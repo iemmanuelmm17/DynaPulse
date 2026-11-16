@@ -33,6 +33,7 @@ use DynaPulse\Service\KeywordMatcher;
 use DynaPulse\Service\Signer;
 use DynaPulse\Service\XlsxWriter;
 use DynaPulse\Support\Config;
+use DynaPulse\Support\Env;
 use DynaPulse\Support\Logger;
 use DynaPulse\Support\Str;
 use DynaPulse\Support\Time;
@@ -143,6 +144,27 @@ test('Str phone and email helpers', function (): void {
     assertSame('4155550123', Str::phoneFromUri('sip:4155550123@acme.com'));
     assertSame(['a@x.com', 'b@y.com'], Str::splitEmails('A@x.com, b@y.com; not-an-email'));
     assertTrue(Str::severityRank('critical') > Str::severityRank('high'), 'severity ranks must be ordered');
+});
+
+test('.env values that hold only a comment stay empty', function (): void {
+    $file = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'dynapulse-env-' . getmypid() . '.env';
+    file_put_contents($file, implode(PHP_EOL, [
+        '# leading comment',
+        'APP_KEY=                # REQUIRED: generate me',
+        'APP_NAME="Dyna Pulse"',
+        'MAIL_HOST=smtp.office365.com   # trailing note',
+        'POLL_ENABLED=true',
+    ]));
+
+    try {
+        Env::load($file);
+        assertSame('', (string) Env::get('APP_KEY', ''), 'a comment must not become the value');
+        assertSame('Dyna Pulse', Env::get('APP_NAME'));
+        assertSame('smtp.office365.com', Env::get('MAIL_HOST'));
+        assertSame('true', Env::get('POLL_ENABLED'));
+    } finally {
+        @unlink($file);
+    }
 });
 
 test('KeywordMatcher: phrase, whole word, regex, case, snippets', function (): void {

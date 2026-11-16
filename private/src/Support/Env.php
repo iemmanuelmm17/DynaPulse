@@ -119,6 +119,12 @@ final class Env
             return $quote === '"' ? stripcslashes($inner) : $inner;
         }
 
+        // Unquoted: a value that is nothing but a comment (KEY=   # note) means
+        // "not set", otherwise the note itself would become the value.
+        if (str_starts_with($raw, '#')) {
+            return '';
+        }
+
         // Unquoted: a " #" sequence starts a comment.
         if (preg_match('/\s#/', $raw, $m, PREG_OFFSET_CAPTURE)) {
             $raw = substr($raw, 0, (int) $m[0][1]);

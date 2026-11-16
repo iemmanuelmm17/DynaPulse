@@ -98,18 +98,40 @@ if ($privatePath !== null) {
 
     if ($envExists) {
         $contents = (string) file_get_contents($envFile);
-        preg_match('/^APP_KEY\s*=\s*"?([^"\r\n]*)"?/m', $contents, $keyMatch);
-        preg_match('/^APP_URL\s*=\s*"?([^"\r\n]*)"?/m', $contents, $urlMatch);
 
-        $key = trim((string) ($keyMatch[1] ?? ''));
-        $add('APP_KEY', strlen($key) >= 16, strlen($key) >= 16 ? 'set (' . strlen($key) . ' chars)' : 'missing — run: php private\\bin\\console.php key:generate');
+        // Read KEY=value the way the application does: the value may be quoted
+        // and may carry a trailing " # comment", while a line that holds only a
+        // comment (KEY=   # note) means "not set" — never the comment text.
+        $envValue = static function (string $name) use ($contents): string {
+            if (preg_match('/^' . preg_quote($name, '/') . '[ \t]*=[ \t]*(.*)$/m', $contents, $match) !== 1) {
+                return '';
+            }
 
-        $appUrl = trim((string) ($urlMatch[1] ?? ''));
+            $value = trim($match[1]);
+
+            if ($value === '' || str_starts_with($value, '#')) {
+                return '';
+            }
+
+            $value = trim((string) preg_replace('/[ \t]+#.*$/', '', $value));
+
+            if (strlen($value) >= 2
+                && ($value[0] === '"' || $value[0] === "'")
+                && $value[0] === substr($value, -1)) {
+                $value = substr($value, 1, -1);
+            }
+
+            return $value;
+        };
+
+        $key = $envValue('APP_KEY');
+        $add('APP_KEY', strlen($key) >= 16, strlen($key) >= 16 ? 'set (' . strlen($key) . ' chars)' : 'missing — run: php bin/console.php key:generate');
+
+        $appUrl = $envValue('APP_URL');
         $add('APP_URL', $appUrl !== '' && str_starts_with($appUrl, 'http'), $appUrl !== '' ? $appUrl : 'missing — alert email links will be wrong');
 
-        foreach (['NS_API_KEY', 'NS_CLIENT_ID', 'NS_CLIENT_SECRET', 'WEBHOOK_SECRET'] as $name) {
-            preg_match('/^' . $name . '\s*=\s*"?([^"\r\n]*)"?/m', $contents, $match);
-            $value = trim((string) ($match[1] ?? ''));
+        foreach (['NS_BASE_URL', 'NS_API_KEY', 'NS_CLIENT_ID', 'NS_CLIENT_SECRET', 'WEBHOOK_SECRET', 'MAIL_HOST', 'MAIL_USERNAME', 'MAIL_PASSWORD'] as $name) {
+            $value = $envValue($name);
             $add($name, $value !== '', $value !== '' ? 'set' : 'empty');
         }
     }
