@@ -787,6 +787,10 @@ try {
                 }
 
                 $out('');
+                $out('    If those CDRs were stored before this build requested raw=yes, they are');
+                $out('    trimmed copies — refresh them and look again:');
+                $out('      php bin/console.php poll 168   then   php bin/console.php calls:audit');
+                $out('');
                 $out('    In NetSapiens, check for each of those domains that Call Intelligence');
                 $out('    (recording transcription) is enabled, and that the calls actually have');
                 $out('    recordings. A domain where it works has a non-null call-intelligence-job-id');
