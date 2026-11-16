@@ -1,0 +1,60 @@
+# DynaPulse — Apache 2.4 configuration for the public document root.
+#
+# Place this file in the folder that index.php lives in, e.g.
+#   D:\xampp\htdocs\dynapulse\public\.htaccess
+#
+# Requirements:
+#   - mod_rewrite enabled        (XAMPP: uncomment "LoadModule rewrite_module" in httpd.conf)
+#   - AllowOverride All          (XAMPP httpd.conf ships "AllowOverride All" for htdocs)
+#   - the private application folder must live OUTSIDE this directory
+#
+# Without mod_rewrite every route except "/" returns Apache's own 404 page,
+# because /login, /calls, /dashboard... are virtual URLs, not files.
+
+# ------------------------------------------------------------------ security
+# Nothing in the private application is ever served from here; these patterns
+# are belt-and-braces in case a stray file is copied in.
+<IfModule mod_authz_core.c>
+    <FilesMatch "(^\.|composer\.(json|lock)$|package(-lock)?\.json$|\.(env|sql|sqlite|log|md|ini|bak|sh)$)">
+        Require all denied
+    </FilesMatch>
+</IfModule>
+
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
+
+# ------------------------------------------------------------------ front controller
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Set a base only if the automatic detection misbehaves behind a proxy, e.g.
+    #   RewriteBase /dynapulse/public/
+
+    # Serve real files and directories as-is (assets, favicon, dp-check.php…)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # Everything else goes to the front controller, query string intact.
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+# ------------------------------------------------------------------ https (optional)
+# Off by default: a server reached as http://<lan-ip> usually has no certificate
+# and forcing HTTPS makes the portal unreachable. Uncomment once TLS is set up.
+#
+# <IfModule mod_rewrite.c>
+#     RewriteEngine On
+#     RewriteCond %{HTTPS} off
+#     RewriteCond %{HTTP_HOST} !^(localhost|127\.0\.0\.1|[0-9.]+)(:\d+)?$ [NC]
+#     RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+# </IfModule>
+
+# ------------------------------------------------------------------ php (optional)
+# Re-enables uploads/webhook bodies when the server-wide limits are too small.
+# <IfModule mod_php.c>
+#     php_value post_max_size 8M
+#     php_value upload_max_filesize 8M
+# </IfModule>

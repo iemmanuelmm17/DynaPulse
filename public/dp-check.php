@@ -183,7 +183,40 @@ $uriPath = '/' . trim(rawurldecode((string) (parse_url($uri, PHP_URL_PATH) ?: '/
 $prefixMatches = $uriPath === ($urlPrefix === '' ? '' : $urlPrefix)
     || str_starts_with($uriPath, ($urlPrefix === '' ? '' : $urlPrefix) . '/')
     || $uriPath === '/';
-$rewriteInstalled = in_array('mod_rewrite', function_exists('apache_get_modules') ? apache_get_modules() : [], true);
+/* ------------------------------------------------------------ web server */
+$software = trim((string) ($_SERVER['SERVER_SOFTWARE'] ?? ''));
+$isApache = stripos($software, 'apache') !== false;
+$isIis = stripos($software, 'microsoft-iis') !== false || stripos($software, 'iis') !== false;
+$rewriteInstalled = function_exists('apache_get_modules') ? in_array('mod_rewrite', apache_get_modules(), true) : null;
+$htaccessPresent = is_file(__DIR__ . DIRECTORY_SEPARATOR . '.htaccess');
+$webConfigPresent = is_file(__DIR__ . DIRECTORY_SEPARATOR . 'web.config');
+
+$add('Web server', true, $software !== '' ? $software : 'not reported');
+
+if ($isApache) {
+    $add(
+        'Apache mod_rewrite',
+        $rewriteInstalled !== false,
+        $rewriteInstalled === true
+            ? 'loaded'
+            : ($rewriteInstalled === null
+                ? 'cannot be read from PHP — if /login gives "The requested URL was not found", mod_rewrite is off'
+                : 'NOT loaded — uncomment "LoadModule rewrite_module" in httpd.conf and restart Apache'),
+    );
+    $add(
+        'public/.htaccess (pretty URLs)',
+        $htaccessPresent,
+        $htaccessPresent
+            ? 'present — routes like /login are rewritten to index.php'
+            : 'MISSING — without it only "/" works; every other URL returns Apache\'s 404 page. Copy .htaccess into ' . __DIR__,
+    );
+} elseif ($isIis) {
+    $add(
+        'public/web.config (URL Rewrite)',
+        $webConfigPresent,
+        $webConfigPresent ? 'present — the IIS URL Rewrite module must be installed' : 'MISSING — copy web.config into ' . __DIR__,
+    );
+}
 
 $e = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
 ?>
@@ -250,7 +283,7 @@ $e = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_Q
             <tr><td class="label">Private folders searched</td><td><span class="mono"><?= $e(implode(' | ', array_unique($searched))) ?></span></td></tr>
             <tr><td class="label">Script name</td><td><span class="mono"><?= $e($scriptName !== '' ? $scriptName : 'not reported') ?></span></td></tr>
             <tr><td class="label">URL prefix</td><td><span class="mono <?= $prefixMatches ? '' : 'warn' ?>"><?= $e($urlPrefix === '' ? 'served from the site root ( / )' : $urlPrefix) ?></span></td></tr>
-            <tr><td class="label">Apache mod_rewrite</td><td><?= $rewriteInstalled ? 'detected' : 'not detectable here (IIS uses URL Rewrite instead)' ?></td></tr>
+            <tr><td class="label">URL rewriting</td><td><?= $isApache ? ($rewriteInstalled === true ? 'Apache mod_rewrite loaded' : 'Apache — mod_rewrite status unknown') . ($htaccessPresent ? ', .htaccess present' : ', .htaccess MISSING') : ($isIis ? 'IIS — ' . ($webConfigPresent ? 'web.config present' : 'web.config MISSING') : 'not applicable') ?></td></tr>
         </table>
     </div>
 
@@ -264,6 +297,10 @@ $e = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_Q
             <li><strong>pdo_sqlite missing</strong> — enable <span class="mono">extension=pdo_sqlite</span> and <span class="mono">extension=sqlite3</span> in php.ini, then restart IIS</li>
             <li><strong>Everything returns HTTP 500.19 before this page loads</strong> — the IIS URL Rewrite module is missing.
                 Either install it, or temporarily rename <span class="mono">web.config</span> and open this page again.</li>
+            <li><strong>Apache answers “The requested URL was not found on this server”</strong> for
+                <span class="mono">/login</span> (but the portal loads at the folder URL) — <span class="mono">.htaccess</span>
+                is missing from this folder, or <span class="mono">AllowOverride None</span> is set for it in
+                <span class="mono">httpd.conf</span>.</li>
             <li><strong>Bootstrap fails</strong> — the exact exception is printed above; also check
                 <span class="mono">D:\private\dynapulse\storage\logs</span></li>
         </ul>

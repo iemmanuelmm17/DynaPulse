@@ -40,7 +40,7 @@ listen to the recording.
 | Component | Version / notes |
 |---|---|
 | PHP | **8.5** (NTS recommended), extensions: `pdo_sqlite`, `curl`, `openssl`, `mbstring`, `json`, `zip`, `fileinfo` |
-| Web server | IIS 10+ on Windows Server (an `web.config` is included); Apache/nginx work too |
+| Web server | Apache 2.4 (**XAMPP** — `.htaccess` included) or IIS 10+ (`web.config` included); nginx needs the same two rewrite lines |
 | Database | SQLite 3 — one file under `private\storage\db` |
 | NetSapiens | API v2 access (`/tokens`, `/domains/{domain}/cdrs`, `/transcriptions`, `/recordings`, `/subscriptions`) |
 | Mail | Microsoft 365 / Outlook **SMTP AUTH** (`smtp.office365.com:587`, STARTTLS) |
@@ -54,7 +54,8 @@ MIME builder and XLSX writer. `composer.json` only defines PSR-4 autoloading for
 ```
 D:\www\dynapulse\public          <- document root (or a sub-folder of the site)
 ├── index.php                    <- front controller
-├── web.config                   <- rewrite rules, security headers
+├── .htaccess                    <- Apache/XAMPP rewrite + security
+├── web.config                   <- IIS rewrite rules, security headers
 ├── favicon.svg
 └── assets\{css,js}
 
@@ -132,19 +133,40 @@ it explicitly with `public\base_path.php`:
 The `DYN_PULSE_BASE` environment variable does the same thing. `dp-check.php` shows the detected
 prefix under *Request → URL prefix*.
 
-### 2. Configure IIS
+### 2. Configure the web server
 
-Create the site with **Physical path** `D:\www\DynaPulse\public` (or point it at the parent folder
+**Apache / XAMPP**
+
+Put the public folder inside `htdocs`, e.g. `D:\xampp\htdocs\dynapulse\public`, and keep the
+private folder outside it (`D:\private\dynapulse`). Then:
+
+1. In `httpd.conf` make sure `LoadModule rewrite_module modules/mod_rewrite.so` is **not**
+   commented out (XAMPP enables it by default).
+2. The htdocs `<Directory>` block must say `AllowOverride All` (XAMPP default). With
+   `AllowOverride None` Apache ignores `.htaccess`.
+3. Restart Apache from the XAMPP control panel.
+
+`public\.htaccess` rewrites every non-file request to `index.php`, and denies dotfiles,
+`.sql`/`.sqlite`/`.log`/`.bak` files and `composer.json`. Apache runs as a service account that
+normally already has write access to `storage`; if the portal says otherwise, grant that account
+Modify on `D:\private\dynapulse\storage`.
+
+> Without `.htaccess` the portal still opens at `http://server/dynapulse/public/` (index.php is the
+> directory index) but `/login`, `/calls`, `/dashboard`… return
+> “The requested URL was not found on this server”.
+
+**IIS 10+**
+
+Create the site with **Physical path** `D:\www\dynapulse\public` (or point it at the parent folder
 for a sub-folder deployment). Install the *URL Rewrite* module. `web.config` already:
 
 - blocks dotfiles and database/log/backup extensions,
 - optionally forces HTTPS (the rule ships commented out, because a server reached by IP address
   usually has no certificate — uncomment it once the site has a TLS binding),
-- blocks dotfiles and database/log/backup extensions,
 - rewrites every non-file request to `index.php`,
 - sets MIME types for `.svg`/`.woff2` and 7-day static caching.
 
-Make sure the application pool identity can **write** to `D:\private\DynaPulse\storage` (logs,
+Make sure the application pool identity can **write** to `D:\private\dynapulse\storage` (logs,
 sessions, SQLite, recording cache).
 
 ### 3. Create the environment file
@@ -319,6 +341,8 @@ php bin\console.php process --limit=10 --budget=45
 | Symptom | Likely cause / fix |
 |---|---|
 | “DynaPulse cannot find its private folder” | Create `public\private_path.php` with the absolute private path, or set `DYN_PULSE_PRIVATE`. |
+| Apache: “The requested URL was not found on this server” for `/login` | `public\.htaccess` is missing, or `AllowOverride None` is set for the folder in `httpd.conf`. The folder URL still loads because `index.php` is the directory index. |
+| Apache: HTTP 500 mentioning `RewriteEngine` | mod_rewrite is not loaded, or `.htaccess` overrides are not allowed — see *Configure the web server*. |
 | “Page not found” on the address you opened | The address must include the portal folder, e.g. `http://server/dynapulse/public/`. Open `dp-check.php` and compare *Request → URL prefix* with the address in the browser. |
 | Login says credentials were not accepted | `NS_CLIENT_ID`/`NS_CLIENT_SECRET` wrong, or the NetSapiens user lacks API scope. Check `storage\logs`. |
 | Emails never arrive | SMTP AUTH disabled on the mailbox, wrong app password, or `MAIL_FROM_ADDRESS` not matching the sender. Use *Send test*. |
