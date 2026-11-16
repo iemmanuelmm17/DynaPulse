@@ -269,10 +269,12 @@ absolute PHP binary path, e.g.
 
 Useful diagnostics: `console.php status` (counters plus per-domain last poll / last error),
 `console.php ns:test` (checks the API key, the domain list and a real CDR query),
-`console.php transcript:test --call=ID [--apply]` (fetches that call's Call Intelligence payload and
-shows what was parsed), `console.php calls:reprocess` (retries calls that have a job id but no stored
-transcript),
-`console.php domains:sync` (import the domains the API key can see),
+`console.php transcript:test --call=ID [--apply] [--cdr]` (fetches that call's Call Intelligence payload
+and shows what was parsed; `--cdr` dumps the stored CDR identity and every raw key),
+`console.php calls:reprocess` (retries calls that have a job id but no stored transcript, and repairs the
+call ids / job id of rows ingested without them),
+`console.php domains:sync` (import the domains the API key can see; used by *Administration → Domains →
+Import*),
 `console.php test-mail --to=you@example.com`, `console.php migrate`, `console.php help`.
 
 ## How alerting works
@@ -352,10 +354,12 @@ php bin\console.php process --limit=10 --budget=45
 | Login says credentials were not accepted | `NS_CLIENT_ID`/`NS_CLIENT_SECRET` wrong, or the NetSapiens user lacks API scope. Check `storage\logs`. |
 | Emails never arrive | SMTP AUTH disabled on the mailbox, wrong app password, or `MAIL_FROM_ADDRESS` not matching the sender. Use *Send test*. |
 | Alerts show “Email not configured” | `MAIL_*` values missing in `.env`; the portal logs `alert.blocked`. |
-| Calls appear but no transcripts | Run `php bin\console.php transcript:test --call=ID`. It prints the exact job id, `YYYYMM` and orig/term call ids sent to `/domains/{domain}/transcriptions`, the HTTP status and the parsed summary/segments. `--apply` saves the result and re-runs matching. `php bin\console.php calls:reprocess` retries every call that has a job id but no transcript (useful after a fix, or when processing gave up after 8 attempts). |
+| Calls appear but no transcripts | Run `php bin\console.php transcript:test --call=ID`. It prints the exact job id, `YYYYMM` and orig/term call ids sent to `/domains/{domain}/transcriptions`, the HTTP status and the parsed summary/segments. `--apply` saves the result and re-runs matching. `php bin\console.php calls:reprocess` retries every call that has a job id but no transcript (useful after a fix, or when processing gave up after 8 attempts) and repairs rows that were stored without call ids. |
+| `403 Bad request. Invalid domain or callids.` from `/transcriptions` | NetSapiens rejects the domain unless it is spelled exactly as configured (`1180.DynaCloud`, not `1180.dynacloud`) and both call ids are present. The portal now stores the CDR's `prefilled-transcription-api` link and replays it verbatim, adopts NetSapiens' spelling on ingest, and re-spells existing rows on *Administration → Domains → Import* (`php bin\console.php domains:sync`). `transcript:test --call=ID --cdr` prints both spellings side by side. |
+| Transcript marked “unavailable” with no HTTP call made | The stored CDR carried neither call ids nor a `prefilled-transcription-api`. Call Intelligence was off for that call; reprocessing cannot invent the ids, so the call stays without a transcript. |
 | `transcript:test` says HTTP 404 | NetSapiens has no Call Intelligence row for that job/date/call id yet — the job may still be running, or the CDR carried no `call-intelligence-job-id` (Call Intelligence was off when the call happened). |
 | Transcript stored but alerts never fired | Keywords are matched against summary, topics and transcript text; check the keyword's *fields* and its severity against `alert_min_severity`. |
-| Recording button 404s | No recording on file in NetSapiens (recording disabled for that user), or the media URL expired before download. |
+| Recording button 404s | No recording on file in NetSapiens (recording disabled for that user), or the media URL expired before download. Calls whose stored CDR had no call ids are never looked up (their `cdr-…` id is not a NetSapiens id) and report no recording instead of a 404. |
 | **No calls at all** (dashboard and Calls list empty) | Nothing has been ingested yet. Run `php bin\console.php ns:test` — it tells you whether the API key works, which domains are configured and whether `/domains/{domain}/cdrs` returns rows. Then `php bin\console.php domains:sync` and `php bin\console.php poll 72`. Without the webhook or a scheduled `poll`, no CDR ever reaches the portal. The same information is on *Settings → Environment health → Ingestion*. |
 | `ns:test` says 0 CDR rows for a domain | The window is empty, the domain name does not match NetSapiens exactly, or the API key cannot read CDRs for that domain (HTTP 403). Try `--hours=168` and check the domain name in NetSapiens. |
 | `ns:test` says HTTP 401/403 on `/domains` | `NS_API_KEY` is wrong or expired, or the key is scoped to a different domain. |

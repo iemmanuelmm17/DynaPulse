@@ -33,6 +33,7 @@ use DynaPulse\Mail\Mailer;
 use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsException;
 use DynaPulse\NetSapiens\Transcription;
+use DynaPulse\NetSapiens\TranscriptionReference;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
@@ -124,6 +125,7 @@ try {
             $out('  poll [hours]                  pull recent CDRs for every pollable domain');
             $out('  ns:test [--domain] [--hours]  check NetSapiens credentials and CDR access');
             $out('  transcript:test --call=ID     fetch one call\'s Call Intelligence payload (--apply saves it)');
+            $out('                                add --cdr to print the stored CDR identity, --raw for the payload');
             $out('  calls:reprocess [--limit]     retry calls that have a job id but no stored transcript');
             $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
@@ -329,10 +331,24 @@ try {
 
             $remote = $ns->domains(200);
             $added = [];
+            $renamed = [];
 
             foreach ($remote as $row) {
                 $name = trim((string) ($row['domain'] ?? ''));
-                if ($name === '' || $domainRepo->findByDomain($name) !== null) {
+
+                if ($name === '') {
+                    continue;
+                }
+
+                $existing = $domainRepo->findByDomain($name);
+
+                if ($existing !== null) {
+                    // Adopt NetSapiens' exact spelling ("1180.DynaCloud").
+                    if ((string) $existing['domain'] !== $name) {
+                        $domainRepo->adoptDomainName((int) $existing['id'], $name);
+                        $renamed[json_encode([(string) $existing['domain'], $name]) ?: $name] = $name;
+                    }
+
                     continue;
                 }
 
@@ -340,11 +356,14 @@ try {
                 $added[] = $name;
             }
 
-            $out(sprintf('%d domain(s) visible to the API key, %d imported.', count($remote), count($added)));
+            $out(sprintf('%d domain(s) visible to the API key, %d imported, %d re-spelled.', count($remote), count($added), count($renamed)));
             foreach ($added as $name) {
                 $out('  + ' . $name);
             }
-            if ($added === []) {
+            foreach ($renamed as $key => $name) {
+                $out('  ~ ' . implode(' -> ', (array) json_decode($key, true)) . '  (now uses the NetSapiens spelling)');
+            }
+            if ($added === [] && $renamed === []) {
                 $out('  Nothing new — toggle the domains you monitor under Administration → Domains.');
             }
             break;
@@ -378,6 +397,10 @@ try {
             $timezone = (string) ($call['domain_timezone'] ?? $config->get('app.timezone', 'UTC'));
             $date = Time::yearMonth((string) ($call['started_at'] ?? ''), $timezone);
 
+            $rawCdr = json_decode((string) ($call['raw_cdr'] ?? '{}'), true);
+            $rawCdr = is_array($rawCdr) ? $rawCdr : [];
+            $reference = TranscriptionReference::fromCdr($rawCdr);
+
             $out('Call #' . $callId . ' — ' . (string) ($call['domain_name'] ?? '') . ' · ' . (string) ($call['started_at'] ?? '') . ' UTC');
             $out('  stored transcript status  ' . (string) ($call['transcript_status'] ?? ''));
             $out('  has_transcript            ' . (int) ($call['has_transcript'] ?? 0));
@@ -386,18 +409,61 @@ try {
             $out('  orig_callid               ' . ($origCallId !== '' ? $origCallId : '(empty)'));
             $out('  term_callid               ' . ($termCallId !== '' ? $termCallId : '(empty)'));
 
-            if ($jobId === '') {
+            if ($reference !== null) {
+                $out('');
+                $out('  prefilled-transcription-api found in the CDR (used in preference):');
+                $out('    domain      ' . $reference->domain);
+                $out('    id          ' . $reference->jobId);
+                $out('    date        ' . $reference->month);
+                $out('    orig_callid ' . $reference->origCallId);
+                $out('    term_callid ' . $reference->termCallId);
+
+                $domainName = (string) ($call['domain_name'] ?? '');
+                if ($reference->domain !== '' && $reference->domain !== $domainName) {
+                    $out('');
+                    $out('  note: the domain row is spelled "' . $domainName . '" but NetSapiens uses "'
+                        . $reference->domain . '";');
+                    $out('        `php bin/console.php domains:sync` (Administration -> Domains -> Import) re-spells it.');
+                }
+            } else {
+                $out('');
+                $out('  no prefilled-transcription-api in the stored CDR — the lookup is built from the');
+                $out('  call row and the NetSapiens spelling of the domain.');
+            }
+
+            if ($option('cdr') !== null) {
+                $identity = [];
+                foreach (['id', 'call-orig-call-id', 'call-term-call-id', 'call-orig-domain', 'call-term-domain', 'call-intelligence-job-id', 'call-intelligence-processing-status'] as $key) {
+                    $value = $rawCdr[$key] ?? null;
+                    $identity[] = $key . ' = ' . (is_scalar($value) ? (string) $value : json_encode($value));
+                }
+                $out('');
+                $out('  stored CDR identity:');
+                foreach ($identity as $line) {
+                    $out('    ' . $line);
+                }
+                $out('  raw_cdr keys: ' . implode(', ', array_slice(array_keys($rawCdr), 0, 40)));
+            }
+
+            if ($jobId === '' && ($reference === null || $reference->jobId === '')) {
                 $out('');
                 $out('Without a job id there is nothing to fetch: Call Intelligence was not enabled for');
                 $out('this call when the CDR was written. Reprocess after enabling it on the domain.');
                 break;
             }
 
+            $probeDomain = $reference !== null && $reference->domain !== '' ? $reference->domain : (string) ($call['domain_name'] ?? '');
+            $probeJob = $reference !== null && $reference->jobId !== '' ? $reference->jobId : $jobId;
+            $probeDate = $reference !== null && $reference->month !== '' ? $reference->month : $date;
+            $probeOrig = $reference !== null && $reference->origCallId !== '' ? $reference->origCallId : $origCallId;
+            $probeTerm = $reference !== null && $reference->termCallId !== '' ? $reference->termCallId : $termCallId;
+
             $out('');
-            $out('GET /domains/' . (string) $call['domain_name'] . '/transcriptions?id=' . $jobId . '&date=' . $date . '&orig_callid=…&term_callid=…');
+            $out('GET /domains/' . $probeDomain . '/transcriptions?id=' . $probeJob . '&date=' . $probeDate
+                . '&orig_callid=' . rawurlencode($probeOrig) . '&term_callid=' . rawurlencode($probeTerm));
 
             try {
-                $payload = $ns->transcription((string) $call['domain_name'], $jobId, $date, $origCallId, $termCallId);
+                $payload = $ns->transcription($probeDomain, $probeJob, $probeDate, $probeOrig, $probeTerm);
             } catch (NsException $e) {
                 $out('  FAILED — ' . $e->getMessage() . ' (HTTP ' . $e->status . ')');
                 $body = trim((string) preg_replace('/\s+/', ' ', (string) $e->responseBody));
@@ -458,6 +524,34 @@ try {
 
             $fixed = 0;
             foreach ($ids as $id) {
+                $before = $callRepo->find($id);
+
+                // Old rows may still carry our synthetic cdr-<hash> id; the stored
+                // CDR often knows the real ones, so put them back before the retry.
+                if ($before !== null) {
+                    $rawCdr = json_decode((string) ($before['raw_cdr'] ?? '{}'), true);
+                    $rawCdr = is_array($rawCdr) ? $rawCdr : [];
+                    $storedOrig = (string) ($before['orig_call_id'] ?? '');
+
+                    if ($rawCdr !== [] && ($storedOrig === '' || str_starts_with($storedOrig, 'cdr-'))) {
+                        $mapped = CdrMapper::map($rawCdr, (string) ($before['domain_name'] ?? ''));
+
+                        $reference = TranscriptionReference::fromCdr($rawCdr);
+                        $jobId = (string) ($reference->jobId ?? '');
+                        $orig = (string) $mapped['orig_call_id'];
+
+                        if ($orig !== '' && !str_starts_with($orig, 'cdr-')) {
+                            $callRepo->patchIdentifiers(
+                                $id,
+                                $orig,
+                                (string) ($mapped['term_call_id'] ?? ''),
+                                $jobId !== '' ? $jobId : (string) ($mapped['job_id'] ?? ''),
+                            );
+                            $out('  #' . $id . ' repaired the call ids / job id from the stored CDR');
+                        }
+                    }
+                }
+
                 $result = $processor->process($id, true);
                 $row = $callRepo->find($id) ?? [];
                 $has = (int) ($row['has_transcript'] ?? 0) === 1;

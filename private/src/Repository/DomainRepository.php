@@ -44,11 +44,41 @@ final class DomainRepository
         return $row ?: null;
     }
 
+    /**
+     * Case-insensitive lookup: NetSapiens domain names are case sensitive on the
+     * API ("1180.DynaCloud"), while DynaPulse stores one row per domain and must
+     * never create "1180.dynacloud" next to it.
+     */
     public function findByDomain(string $domain): ?array
     {
-        $row = $this->db->first('SELECT * FROM domains WHERE domain = :d', ['d' => $domain]);
+        $row = $this->db->first('SELECT * FROM domains WHERE domain = :d COLLATE NOCASE', ['d' => $domain]);
 
         return $row ?: null;
+    }
+
+    /** Adopt the exact spelling NetSapiens uses, keeping the row unique. */
+    public function adoptDomainName(int $id, string $domain): void
+    {
+        $domain = trim($domain);
+
+        if ($domain === '') {
+            return;
+        }
+
+        $row = $this->find($id);
+
+        if ($row === null || (string) $row['domain'] === $domain) {
+            return;
+        }
+
+        $data = ['domain' => $domain];
+
+        // Keep the label readable when it was just a copy of the old name.
+        if ((string) ($row['label'] ?? '') === (string) $row['domain']) {
+            $data['label'] = $domain;
+        }
+
+        $this->db->update('domains', $data, 'id = :id', ['id' => $id]);
     }
 
     public function ensure(string $domain, string $label = '', string $timezone = 'UTC'): array

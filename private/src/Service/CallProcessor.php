@@ -6,6 +6,7 @@ namespace DynaPulse\Service;
 
 use DynaPulse\NetSapiens\NsException;
 use DynaPulse\NetSapiens\NsGateway;
+use DynaPulse\NetSapiens\TranscriptionReference;
 use DynaPulse\NetSapiens\Transcription;
 use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
@@ -71,41 +72,67 @@ final class CallProcessor
         $hasTranscript = (int) $call['has_transcript'] === 1;
         $jobId = trim((string) ($call['transcript_job_id'] ?? ''));
 
-        if (!$hasTranscript && $jobId !== '') {
-            try {
-                $origCallId = trim((string) ($call['orig_call_id'] ?? ''));
-                $termCallId = trim((string) ($call['term_call_id'] ?? ''));
+        // The CDR carries the exact lookup NetSapiens expects (domain case and
+        // call ids included); it is more reliable than anything we derive.
+        $rawCdr = json_decode((string) ($call['raw_cdr'] ?? '{}'), true);
+        $rawCdr = is_array($rawCdr) ? $rawCdr : [];
+        $nsDomain = self::nsDomain($domain, $rawCdr);
+        $reference = TranscriptionReference::fromCdr($rawCdr);
 
-                if ($origCallId === '' && $termCallId === '') {
-                    $origCallId = (string) ($call['call_id'] ?? '');
-                }
+        if (!$hasTranscript && ($jobId !== '' || $reference !== null)) {
+            $effectiveJob = $reference !== null && $reference->jobId !== '' ? $reference->jobId : $jobId;
+            $origCallId = $reference !== null && $reference->origCallId !== ''
+                ? $reference->origCallId
+                : trim((string) ($call['orig_call_id'] ?? ''));
+            $termCallId = $reference !== null && $reference->termCallId !== ''
+                ? $reference->termCallId
+                : trim((string) ($call['term_call_id'] ?? ''));
 
-                $payload = $this->fetchTranscription(
-                    (string) $domain['domain'],
-                    $jobId,
-                    isset($call['started_at']) ? (string) $call['started_at'] : null,
-                    $timezone,
-                    $origCallId,
-                    $termCallId,
-                );
+            if ($effectiveJob === '' || (!self::usableCallId($origCallId) && !self::usableCallId($termCallId))) {
+                // Nothing to ask for: the CDR had no NetSapiens call ids, so the
+                // row can only be identified by our synthetic cdr-<hash> id.
+                $updates['transcript_status'] = 'unavailable';
+                $updates['last_error'] = 'transcription: the CDR carried no NetSapiens call ids.';
+                Logger::warning('processor.transcription_unidentifiable', ['call_id' => $callId]);
+            } else {
+                try {
+                    $startedAt = isset($call['started_at']) ? (string) $call['started_at'] : null;
+                    $month = $reference !== null && $reference->month !== ''
+                        ? $reference->month
+                        : Time::yearMonth($startedAt, $timezone);
 
-                $transcription = Transcription::fromApi($payload);
+                    $payload = $this->fetchTranscription(
+                        $nsDomain,
+                        $effectiveJob,
+                        $month,
+                        Time::yearMonth($startedAt, 'UTC'),
+                        $origCallId,
+                        $termCallId,
+                    );
 
-                if ($transcription->status === 'finished' || $transcription->segments !== [] || $transcription->summary !== '') {
-                    $updates += $transcription->toColumns();
-                } else {
-                    $transcriptPending = true;
-                }
-            } catch (NsException $e) {
-                if ($e->isNotFound()) {
-                    $transcriptPending = true;
-                } elseif ($e->isRetryable()) {
-                    $transcriptPending = true;
-                    $updates['last_error'] = 'transcription: ' . $e->getMessage();
-                } else {
-                    $updates['transcript_status'] = 'error';
-                    $updates['last_error'] = 'transcription: ' . $e->getMessage();
-                    Logger::warning('processor.transcription_failed', ['call_id' => $callId, 'error' => $e->getMessage()]);
+                    $transcription = Transcription::fromApi($payload);
+
+                    if ($transcription->status === 'finished' || $transcription->segments !== [] || $transcription->summary !== '') {
+                        $updates += $transcription->toColumns();
+                    } else {
+                        $transcriptPending = true;
+                    }
+                } catch (NsException $e) {
+                    if ($e->isNotFound()) {
+                        $transcriptPending = true;
+                    } elseif ($e->isRetryable()) {
+                        $transcriptPending = true;
+                        $updates['last_error'] = 'transcription: ' . $e->getMessage();
+                    } else {
+                        $updates['transcript_status'] = 'error';
+                        $updates['last_error'] = 'transcription: ' . $e->getMessage();
+                        Logger::warning('processor.transcription_failed', [
+                            'call_id' => $callId,
+                            'domain' => $nsDomain,
+                            'job_id' => $effectiveJob,
+                            'error' => $e->getMessage(),
+                        ]);
+                    }
                 }
             }
         } elseif (!$hasTranscript) {
@@ -113,9 +140,11 @@ final class CallProcessor
         }
 
         // ---- Recording ---------------------------------------------------------
-        if ((int) $call['has_recording'] === 0 && $call['recording_status'] !== 'none') {
+        $recordingCallId = trim((string) ($call['orig_call_id'] ?? '')) ?: trim((string) ($call['call_id'] ?? ''));
+
+        if ((int) $call['has_recording'] === 0 && $call['recording_status'] !== 'none' && self::usableCallId($recordingCallId)) {
             try {
-                $recording = $this->ns->recording((string) $domain['domain'], (string) ($call['orig_call_id'] ?: $call['call_id']));
+                $recording = $this->ns->recording($nsDomain, $recordingCallId);
 
                 if ($recording !== null) {
                     $updates['recording_status'] = 'available';
@@ -129,8 +158,12 @@ final class CallProcessor
             } catch (NsException $e) {
                 $updates['recording_status'] = 'error';
                 $updates['last_error'] = 'recording: ' . $e->getMessage();
-                Logger::warning('processor.recording_failed', ['call_id' => $callId, 'error' => $e->getMessage()]);
+                Logger::warning('processor.recording_failed', ['call_id' => $callId, 'domain' => $nsDomain, 'error' => $e->getMessage()]);
             }
+        } elseif ((int) $call['has_recording'] === 0 && $call['recording_status'] !== 'none') {
+            // Synthetic cdr-<hash> id: NetSapiens cannot look this up, so asking
+            // only produces a guaranteed 404 in the log.
+            $updates['recording_status'] = 'none';
         }
 
         if ($updates !== []) {
@@ -198,24 +231,50 @@ final class CallProcessor
     private function fetchTranscription(
         string $domainName,
         string $jobId,
-        ?string $startedAt,
-        string $timezone,
+        string $month,
+        string $utcMonth,
         string $origCallId,
         string $termCallId,
     ): array {
-        $month = Time::yearMonth($startedAt, $timezone);
-
         try {
             return $this->ns->transcription($domainName, $jobId, $month, $origCallId, $termCallId);
         } catch (NsException $e) {
-            $utcMonth = Time::yearMonth($startedAt, 'UTC');
-
-            if ($e->isNotFound() && $utcMonth !== $month) {
+            if ($e->isNotFound() && $utcMonth !== '' && $utcMonth !== $month) {
                 return $this->ns->transcription($domainName, $jobId, $utcMonth, $origCallId, $termCallId);
             }
 
             throw $e;
         }
+    }
+
+    /** Our own placeholder id ("cdr-<hash>") can never be used against the API. */
+    private static function usableCallId(string $callId): bool
+    {
+        $callId = trim($callId);
+
+        return $callId !== '' && !str_starts_with($callId, 'cdr-');
+    }
+
+    /**
+     * NetSapiens domain names are case sensitive on some endpoints
+     * ("1180.DynaCloud" vs the lower-cased spelling we store for uniqueness).
+     *
+     * @param array<string, mixed> $domainRow
+     * @param array<string, mixed> $cdr
+     */
+    private static function nsDomain(array $domainRow, array $cdr): string
+    {
+        $stored = (string) ($domainRow['domain'] ?? '');
+
+        foreach (['call-term-domain', 'call-orig-domain', 'domain'] as $key) {
+            $candidate = $cdr[$key] ?? null;
+
+            if (is_string($candidate) && trim($candidate) !== '' && ($stored === '' || strcasecmp($candidate, $stored) === 0)) {
+                return trim($candidate);
+            }
+        }
+
+        return $stored;
     }
 
     /** @return array{processed:int, retry:int, failed:int, skipped:int} */

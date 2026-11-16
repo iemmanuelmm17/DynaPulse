@@ -97,9 +97,23 @@ final class DomainController extends BaseController
         }
 
         $added = 0;
+        $renamed = 0;
+
         foreach ($remote as $row) {
             $domain = trim((string) ($row['domain'] ?? ''));
-            if ($domain === '' || $this->domains->findByDomain($domain) !== null) {
+
+            if ($domain === '') {
+                continue;
+            }
+
+            $existing = $this->domains->findByDomain($domain);
+
+            if ($existing !== null) {
+                if ((string) $existing['domain'] !== $domain) {
+                    $this->domains->adoptDomainName((int) $existing['id'], $domain);
+                    $renamed++;
+                }
+
                 continue;
             }
 
@@ -110,9 +124,15 @@ final class DomainController extends BaseController
 
         $this->audit->log('domain.synced', $this->user()->id, null, ['added' => $added], $request->ip());
 
-        return $this->redirect('/domains', $added === 0
-            ? 'No new domains were found in NetSapiens.'
-            : sprintf('%d domain(s) imported from NetSapiens.', $added), 'success');
+        if ($added === 0 && $renamed === 0) {
+            return $this->redirect('/domains', 'No new domains were found in NetSapiens.', 'success');
+        }
+
+        return $this->redirect('/domains', trim(sprintf(
+            '%d domain(s) imported from NetSapiens.%s',
+            $added,
+            $renamed > 0 ? ' ' . $renamed . ' re-spelled to match NetSapiens.' : '',
+        )), 'success');
     }
 
     public function toggle(Request $request, array $params = []): Response

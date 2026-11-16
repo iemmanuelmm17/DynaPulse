@@ -212,6 +212,22 @@ final class CallRepository
     }
 
     /** @param array<string, mixed> $filters */
+    /** Repair the NetSapiens identifiers of a row ingested without them. */
+    public function patchIdentifiers(int $id, string $origCallId, string $termCallId = '', string $jobId = ''): void
+    {
+        $data = ['orig_call_id' => $origCallId];
+
+        if ($termCallId !== '') {
+            $data['term_call_id'] = $termCallId;
+        }
+
+        if ($jobId !== '') {
+            $data['transcript_job_id'] = $jobId;
+        }
+
+        $this->db->update('calls', $data, 'id = :id', ['id' => $id]);
+    }
+
     /**
      * Calls that carry a Call Intelligence job id but never got their transcript
      * stored (wrong identifiers, API hiccup, interrupted run). Used by
@@ -226,7 +242,9 @@ final class CallRepository
         $rows = $this->db->select(
             "SELECT id FROM calls
              WHERE has_transcript = 0
-               AND transcript_job_id <> ''
+               AND (transcript_job_id <> ''
+                    OR raw_cdr LIKE '%transcription-api%'
+                    OR raw_cdr LIKE '%call-intelligence-job-id%')
                AND transcript_status IN ('pending', 'unavailable', 'error')
              ORDER BY COALESCE(started_at, created_at) DESC
              LIMIT " . $limit,

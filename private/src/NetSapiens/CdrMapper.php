@@ -22,9 +22,26 @@ final class CdrMapper
      */
     public static function map(array $cdr, string $domain): array
     {
-        $origCallId = self::text($cdr, ['call-orig-call-id', 'call-orig-callid', 'orig_callid']);
-        $termCallId = self::text($cdr, ['call-term-call-id', 'call-term-callid', 'term_callid']);
-        $plainCallId = self::text($cdr, ['call-id', 'callid']);
+        $origCallId = self::text($cdr, ['call-orig-call-id', 'call-orig-callid', 'orig_callid', 'orig-callid']);
+        $termCallId = self::text($cdr, ['call-term-call-id', 'call-term-callid', 'term_callid', 'term-callid']);
+        $plainCallId = self::text($cdr, ['call-id', 'callid', 'id']);
+
+        // Some payloads omit the call ids but still carry the Call Intelligence
+        // lookup, which names them. Recovering them keeps recordings and
+        // transcripts addressable.
+        if ($origCallId === '' || $termCallId === '') {
+            $reference = TranscriptionReference::fromCdr($cdr);
+
+            if ($reference !== null) {
+                if ($origCallId === '') {
+                    $origCallId = $reference->origCallId;
+                }
+
+                if ($termCallId === '') {
+                    $termCallId = $reference->termCallId;
+                }
+            }
+        }
 
         $callId = $origCallId !== '' ? $origCallId : ($plainCallId !== '' ? $plainCallId : $termCallId);
         if ($callId === '') {

@@ -22,6 +22,7 @@ use DynaPulse\Http\View;
 use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\NetSapiens\Transcription;
+use DynaPulse\NetSapiens\TranscriptionReference;
 use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
 use DynaPulse\Repository\KeywordRepository;
@@ -464,6 +465,133 @@ test('The transcript lookup uses the CDR orig/term call ids', function () use ($
     assertTrue(in_array('voicemail', (array) $row['transcript_topics'], true), 'topics stored');
     assertSame('negative', (string) $row['sentiment_label']);
     assertContains('To dial another extension', (string) $row['transcript_text']);
+});
+
+test('prefilled-transcription-api wins over the stored ids (and fixes the domain case)', function () use ($container, $fakeNs, $transcriptionSample): void {
+    $prefilled = '/ns-api/v2/domains/1180.DynaCloud/transcriptions?id=112174179&date=202611'
+        . '&orig_callid=768181475%40172.16.10.228'
+        . '&term_callid=20261116153414064248-cac18a7984653a998c54034ec629e12c';
+
+    $reference = TranscriptionReference::parse(htmlspecialchars($prefilled, ENT_QUOTES));
+    assertTrue($reference !== null, 'the escaped CDR value parses');
+    assertSame('1180.DynaCloud', $reference->domain);
+    assertSame('112174179', $reference->jobId);
+    assertSame('202611', $reference->month);
+    assertSame('768181475@172.16.10.228', $reference->origCallId);
+    assertSame('20261116153414064248-cac18a7984653a998c54034ec629e12c', $reference->termCallId);
+
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    // This is how the row looked on a real install: lower-cased by ingestion.
+    $domainRepo->ensure('1180.dynacloud', 'DynaCloud', 'Asia/Manila');
+
+    // A CDR whose call ids are missing entirely: only the prefilled lookup can save it.
+    $fakeNs->transcriptionFixtures['1180.DynaCloud:112174179'] = $transcriptionSample();
+
+    $cdr = [
+        'id' => '1794843254e84c773f1c3da1fcb12b893ea5da8237',
+        'domain' => '1180.DynaCloud',
+        'call-orig-domain' => '1180.DynaCloud',
+        'call-term-domain' => '1180.DynaCloud',
+        'call-orig-from-user' => 1003,
+        'call-orig-to-user' => 83838,
+        'call-term-user' => 6001,
+        'call-start-datetime' => '2026-11-16T15:34:14+00:00',
+        'call-disconnect-datetime' => '2026-11-16T15:34:23+00:00',
+        'call-total-duration-seconds' => 7,
+        'call-intelligence-job-id' => 112174179,
+        'prefilled-transcription-api' => $prefilled,
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('1180.DynaCloud', $cdr, true);
+
+    $queries = $fakeNs->transcriptionQueries;
+    $last = end($queries);
+    assertTrue(is_array($last), 'transcription was requested');
+    assertSame('1180.DynaCloud', $last['domain'], 'exact NetSapiens domain spelling');
+    assertSame('112174179', $last['job']);
+    assertSame('202611', $last['date']);
+    assertSame('768181475@172.16.10.228', $last['orig']);
+    assertSame('20261116153414064248-cac18a7984653a998c54034ec629e12c', $last['term']);
+
+    $adopted = $domainRepo->findByDomain('1180.dynacloud');
+    assertSame('1180.DynaCloud', (string) $adopted['domain'], 'the stored domain adopted the NetSapiens spelling');
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $row = $calls->find((int) $result['call_id']);
+    assertTrue($row !== null, 'call stored');
+    assertSame(1, (int) $row['has_transcript'], 'transcript stored from the prefilled lookup');
+    assertTrue(in_array('voicemail', (array) $row['transcript_topics'], true), 'topics stored');
+});
+
+test('Call ids are recovered from the prefilled transcription link', function (): void {
+    $cdr = [
+        'id' => '1794843254e84c773f1c3da1fcb12b893ea5da8237',
+        'call-orig-domain' => '1180.DynaCloud',
+        'call-term-domain' => '1180.DynaCloud',
+        'call-start-datetime' => '2026-11-16T15:34:14+00:00',
+        'prefilled-transcription-api' => '/ns-api/v2/domains/1180.DynaCloud/transcriptions?id=112174179&date=202611'
+            . '&orig_callid=768181475%40172.16.10.228'
+            . '&term_callid=20261116153414064248-cac18a7984653a998c54034ec629e12c',
+    ];
+
+    $mapped = CdrMapper::map($cdr, '1180.dynacloud');
+
+    assertSame('768181475@172.16.10.228', $mapped['orig_call_id'], 'orig id recovered');
+    assertSame('20261116153414064248-cac18a7984653a998c54034ec629e12c', $mapped['term_call_id'], 'term id recovered');
+    assertSame('768181475@172.16.10.228', $mapped['call_id'], 'the real call id is used instead of a cdr- hash');
+});
+
+test('A CDR without call ids is not sent to the API', function () use ($container, $fakeNs): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domainRepo->ensure('noids.test', 'No IDs', 'UTC');
+
+    $before = $fakeNs->transcriptionCalls;
+
+    $cdr = [
+        'domain' => 'noids.test',
+        'call-start-datetime' => '2026-11-16T15:34:14+00:00',
+        'call-total-duration-seconds' => 3,
+        'call-intelligence-job-id' => 999001,
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('noids.test', $cdr, true);
+
+    assertSame($before, $fakeNs->transcriptionCalls, 'no lookup for an unidentifiable call');
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $row = $calls->find((int) $result['call_id']);
+    assertSame('unavailable', (string) $row['transcript_status']);
+    assertContains('no NetSapiens call ids', (string) $row['last_error']);
+    assertSame(0, (int) $row['has_transcript']);
+});
+
+test('Domains keep the NetSapiens spelling and stay unique per case', function () use ($container): void {
+    /** @var DomainRepository $domains */
+    $domains = $container->get(DomainRepository::class);
+
+    $lower = $domains->ensure('case.test', 'case.test', 'UTC');
+    assertSame('case.test', (string) $lower['domain']);
+
+    // Case-insensitive lookup must not create a second row.
+    $found = $domains->findByDomain('CASE.Test');
+    assertTrue($found !== null, 'case-insensitive lookup');
+    assertSame((int) $lower['id'], (int) $found['id']);
+
+    $domains->adoptDomainName((int) $lower['id'], 'Case.Test');
+    $renamed = $domains->find((int) $lower['id']);
+    assertSame('Case.Test', (string) $renamed['domain']);
+    assertSame('Case.Test', (string) $renamed['label'], 'label follows when it was a copy of the name');
+
+    $count = $domains->findByDomain('case.test');
+    assertSame((int) $lower['id'], (int) $count['id'], 'still one row');
 });
 
 /* ------------------------------------------------------------------------- */

@@ -46,7 +46,16 @@ final class IngestService
             return ['status' => 'ignored', 'call_id' => null, 'domain' => '', 'message' => 'No domain on payload.'];
         }
 
+        $exactDomain = self::exactDomainSpelling($cdr, $domainName);
         $domain = $this->domains->findByDomain($domainName);
+
+        // The stored name may be a lower-cased copy of the real one; NetSapiens
+        // rejects the lower-cased spelling on some endpoints (transcriptions).
+        if ($domain !== null && $exactDomain !== '' && (string) $domain['domain'] !== $exactDomain) {
+            $this->domains->adoptDomainName((int) $domain['id'], $exactDomain);
+            $domain['domain'] = $exactDomain;
+            Logger::info('ingest.domain_spelling_adopted', ['domain' => $exactDomain]);
+        }
 
         // The posted leg may be the external carrier (inbound: orig) while the
         // domain DynaPulse knows is on the other leg. Try the sibling leg before
@@ -76,7 +85,11 @@ final class IngestService
                 return ['status' => 'ignored', 'call_id' => null, 'domain' => $domainName, 'message' => 'Domain is not configured.'];
             }
 
-            $domain = $this->domains->ensure($domainName, $domainName, (string) \DynaPulse\Http\Context::config('app.timezone', 'UTC'));
+            $domain = $this->domains->ensure(
+                $exactDomain !== '' ? $exactDomain : $domainName,
+                $exactDomain !== '' ? $exactDomain : $domainName,
+                (string) \DynaPulse\Http\Context::config('app.timezone', 'UTC'),
+            );
             Logger::info('ingest.domain_imported', ['domain' => $domainName]);
         }
 
@@ -117,6 +130,25 @@ final class IngestService
             'domain' => $domainName,
             'message' => $isNew ? 'New call queued.' : 'Existing call queued.',
         ];
+    }
+
+    /**
+     * The domain name exactly as NetSapiens spells it, when one of the CDR's
+     * domain fields matches the domain we store (case-insensitive).
+     *
+     * @param array<string, mixed> $cdr
+     */
+    public static function exactDomainSpelling(array $cdr, string $known): string
+    {
+        foreach (['call-term-domain', 'call-orig-domain', 'domain'] as $key) {
+            $candidate = $cdr[$key] ?? null;
+
+            if (is_string($candidate) && trim($candidate) !== '' && strcasecmp(trim($candidate), $known) === 0) {
+                return trim($candidate);
+            }
+        }
+
+        return '';
     }
 
     /**
