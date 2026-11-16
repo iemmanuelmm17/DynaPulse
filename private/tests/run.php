@@ -20,6 +20,7 @@ use DynaPulse\Http\Request;
 use DynaPulse\Http\Response;
 use DynaPulse\Http\View;
 use DynaPulse\NetSapiens\CdrMapper;
+use DynaPulse\NetSapiens\NsClient;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\NetSapiens\Transcription;
 use DynaPulse\NetSapiens\TranscriptionReference;
@@ -650,6 +651,16 @@ test('A 403 from a mis-spelled domain is retried with the NetSapiens spelling', 
     }
 });
 
+test('callid variants cover the 0_ prefixed and bare spellings', function (): void {
+    $variants = NsClient::callIdVariants(['0_2654816984@172.16.10.109', '', 'abc@1.2.3.4']);
+
+    assertSame('0_2654816984@172.16.10.109', $variants[0], 'the stored spelling is tried first');
+    assertTrue(in_array('2654816984@172.16.10.109', $variants, true), 'the bare spelling is tried too');
+    assertTrue(in_array('abc@1.2.3.4', $variants, true), 'the original id is kept');
+    assertTrue(in_array('0_abc@1.2.3.4', $variants, true), 'the prefixed spelling is added when missing');
+    assertSame(array_values(array_unique($variants)), $variants, 'no duplicates');
+});
+
 test('A CDR that only carries call-id is queried with that id', function () use ($container, $fakeNs): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);
@@ -672,7 +683,11 @@ test('A CDR that only carries call-id is queried with that id', function () use 
     ));
 
     assertSame(1, count($queries), 'the plain call-id was used for exactly one request');
-    assertSame('20261116153414064248-cac18a7984653a998c54034ec629e12c', $queries[0]['orig'], 'call-id became orig_callid');
+    assertSame('20261116153414064248-cac18a7984653a998c54034ec629e12c', $queries[0]['plain'], 'the CDR call-id is handed to the gateway');
+    assertTrue(
+        $queries[0]['orig'] === '' || $queries[0]['orig'] === '20261116153414064248-cac18a7984653a998c54034ec629e12c',
+        'the row orig may repeat the call-id',
+    );
     assertSame('', $queries[0]['term']);
 
     /** @var CallRepository $calls */

@@ -31,6 +31,7 @@ interface NsGateway
         string $yearMonth,
         string $origCallId = '',
         string $termCallId = '',
+        string $plainCallId = '',
     ): array;
 
     /** @return array<string, mixed>|null */

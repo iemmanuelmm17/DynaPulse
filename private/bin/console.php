@@ -64,7 +64,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.8';
+const DP_CODE_BUILD = '2026.11.16.9';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -736,6 +736,7 @@ try {
             $cdrTerm = trim((string) ($rawCdr['call-term-call-id'] ?? ''));
             $cdrJob = trim((string) ($rawCdr['call-intelligence-job-id'] ?? ''));
             $cdrStart = trim((string) ($rawCdr['call-start-datetime'] ?? ''));
+            $cdrPlain = trim((string) ($rawCdr['call-id'] ?? $rawCdr['callid'] ?? ''));
             $cdrDomain = '';
             $cdrDomainKey = 'domain';
 
@@ -801,6 +802,11 @@ try {
                 [$termCallId, 'the row (term_call_id)'],
             ]);
 
+            [$probePlain, $plainSource] = $resolve([
+                [$cdrPlain, 'the CDR (call-id)'],
+                [str_starts_with((string) ($call['call_id'] ?? ''), 'cdr-') ? '' : (string) ($call['call_id'] ?? ''), 'the row (call_id)'],
+            ]);
+
             $out('Call #' . $callId . ' — ' . (string) ($call['domain_name'] ?? '') . ' · started '
                 . (string) ($call['started_at'] ?? '(unknown)') . ' UTC');
             $out('  transcript status  ' . (string) ($call['transcript_status'] ?? '')
@@ -820,6 +826,7 @@ try {
                 'date' => [$probeDate, $dateSource],
                 'orig_callid' => [$probeOrig, $origSource],
                 'term_callid' => [$probeTerm, $termSource],
+                'call-id' => [$probePlain, $plainSource],
             ] as $label => [$value, $source]) {
                 $out(sprintf('    %-12s %s   [%s]', $label, $value !== '' ? $value : '(empty)', $source));
             }
@@ -880,12 +887,39 @@ try {
                 }
             }
 
+            $shapes = [];
+
+            if ($probeOrig !== '' || $probeTerm !== '') {
+                $shapes[] = 'orig_callid=' . rawurlencode($probeOrig) . '&term_callid=' . rawurlencode($probeTerm);
+            }
+
+            foreach (\DynaPulse\NetSapiens\NsClient::callIdVariants([$probeTerm, $probeOrig, $probePlain]) as $callId) {
+                $shapes[] = 'callid=' . rawurlencode($callId);
+            }
+
+            if ($shapes === []) {
+                $shapes[] = '(id + date only)';
+            }
+
             $out('');
-            $out('GET /domains/' . $probeDomain . '/transcriptions?id=' . $probeJob . '&date=' . $probeDate
-                . '&orig_callid=' . rawurlencode($probeOrig) . '&term_callid=' . rawurlencode($probeTerm));
+            $out('GET /domains/' . $probeDomain . '/transcriptions?id=' . $probeJob . '&date=' . $probeDate);
+            $out('  tried in this order:');
+
+            foreach ($shapes as $index => $shape) {
+                $out('    ' . ($index + 1) . '. ' . $shape);
+            }
+
+            $out('');
 
             try {
-                $payload = $ns->transcription($probeDomain, $probeJob, $probeDate, $probeOrig, $probeTerm);
+                $payload = $ns->transcription(
+                    $probeDomain,
+                    $probeJob,
+                    $probeDate,
+                    $probeOrig,
+                    $probeTerm,
+                    $probePlain,
+                );
             } catch (NsException $e) {
                 $out('  FAILED — ' . $e->getMessage() . ' (HTTP ' . $e->status . ')');
                 $body = trim((string) preg_replace('/\s+/', ' ', (string) $e->responseBody));

@@ -67,6 +67,7 @@ final class FakeNs implements NsGateway
         string $yearMonth,
         string $origCallId = '',
         string $termCallId = '',
+        string $plainCallId = '',
     ): array {
         $this->transcriptionCalls++;
         $this->transcriptionQueries[] = [
@@ -75,6 +76,7 @@ final class FakeNs implements NsGateway
             'date' => $yearMonth,
             'orig' => $origCallId,
             'term' => $termCallId,
+            'plain' => $plainCallId,
         ];
 
         if ($this->exactDomain !== null && $domain !== $this->exactDomain) {

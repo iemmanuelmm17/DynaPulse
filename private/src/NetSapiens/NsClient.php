@@ -87,39 +87,49 @@ final class NsClient implements NsGateway
         string $yearMonth,
         string $origCallId = '',
         string $termCallId = '',
+        string $plainCallId = '',
     ): array {
         $path = '/domains/' . rawurlencode($domain) . '/transcriptions';
         $base = ['id' => $jobId, 'date' => $yearMonth];
 
         // NetSapiens deployments differ in how they identify the row: the CDR's
         // own "prefilled-transcription-api" uses orig_callid + term_callid, while
-        // older builds accept a single callid (which is the term leg). Try the
-        // documented shape first and fall back only on "not found / bad request",
-        // so auth or server problems are never masked.
+        // others (and the DynaCloud cluster) answer to a single callid, which is
+        // the CDR's call-id — sometimes prefixed with the leg ("0_2654816984@…").
+        // Try the documented shape first and fall back only on "not found / bad
+        // request", so auth or server problems are never masked.
         $attempts = [];
 
         if ($origCallId !== '' || $termCallId !== '') {
-            $attempts[] = $base + array_filter([
+            $attempts['orig/term'] = $base + array_filter([
                 'orig_callid' => $origCallId,
                 'term_callid' => $termCallId,
             ], static fn (string $value): bool => $value !== '');
         }
 
-        foreach ([$termCallId, $origCallId] as $callId) {
-            if ($callId !== '') {
-                $attempts[] = $base + ['callid' => $callId];
-            }
+        foreach (self::callIdVariants([$termCallId, $origCallId, $plainCallId]) as $callId) {
+            $attempts['callid=' . $callId] = $base + ['callid' => $callId];
         }
 
         if ($attempts === []) {
-            $attempts[] = $base;
+            $attempts['id+date'] = $base;
         }
 
         $last = null;
 
-        foreach ($attempts as $query) {
+        foreach ($attempts as $shape => $query) {
             try {
-                return $this->request('GET', $path, $query);
+                $result = $this->request('GET', $path, $query);
+
+                if (count($attempts) > 1) {
+                    Logger::debug('netsapiens.transcription_shape', [
+                        'shape' => $shape,
+                        'domain' => $domain,
+                        'job' => $jobId,
+                    ]);
+                }
+
+                return $result;
             } catch (NsException $e) {
                 $last = $e;
 
@@ -130,6 +140,36 @@ final class NsClient implements NsGateway
         }
 
         throw $last ?? new NsException('Transcription request failed without a response.');
+    }
+
+    /**
+     * Every spelling of a call id NetSapiens might file the transcription under.
+     * Some deployments prefix the leg ("0_2654816984@172.16.10.109"), others do not.
+     *
+     * @param list<string> $ids
+     * @return list<string>
+     */
+    public static function callIdVariants(array $ids): array
+    {
+        $variants = [];
+
+        foreach ($ids as $id) {
+            $id = trim((string) $id);
+
+            if ($id === '') {
+                continue;
+            }
+
+            $variants[] = $id;
+
+            if (preg_match('/^\d+_(.+)$/', $id, $matches) === 1) {
+                $variants[] = $matches[1];
+            } elseif (!str_contains($id, '_')) {
+                $variants[] = '0_' . $id;
+            }
+        }
+
+        return array_values(array_unique($variants));
     }
 
     public function recording(string $domain, string $callId): ?array

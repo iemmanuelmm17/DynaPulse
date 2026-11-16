@@ -99,21 +99,17 @@ final class CallProcessor
                 ? $reference->termCallId
                 : trim((string) ($call['term_call_id'] ?? ''));
 
-            // Some NetSapiens builds return only the leg id ("call-id") and no
-            // orig/term split; that id is still worth one request.
-            if (!self::usableCallId($origCallId) && !self::usableCallId($termCallId)) {
-                $plainId = trim((string) ($rawCdr['call-id'] ?? $rawCdr['callid'] ?? ''));
+            // Many deployments file the transcription under the CDR's single
+            // call-id ("0_2654816984@172.16.10.109") instead of an orig/term split.
+            $plainCallId = trim((string) ($rawCdr['call-id'] ?? $rawCdr['callid'] ?? ''));
 
-                if (self::usableCallId($plainId)) {
-                    $origCallId = $plainId;
-                    Logger::info('processor.transcription_plain_call_id', [
-                        'call_id' => $callId,
-                        'call_id_used' => $plainId,
-                    ]);
-                }
+            if (!self::usableCallId($plainCallId)) {
+                $plainCallId = '';
             }
 
-            if ($effectiveJob === '' || (!self::usableCallId($origCallId) && !self::usableCallId($termCallId))) {
+            if ($effectiveJob === ''
+                || (!self::usableCallId($origCallId) && !self::usableCallId($termCallId) && $plainCallId === '')
+            ) {
                 // Nothing to ask for: the CDR had no NetSapiens call ids, so the
                 // row can only be identified by our synthetic cdr-<hash> id.
                 $updates['transcript_status'] = 'unavailable';
@@ -139,6 +135,7 @@ final class CallProcessor
                         Time::yearMonth($startedAt, 'UTC'),
                         $origCallId,
                         $termCallId,
+                        $plainCallId,
                         (int) $domain['id'],
                     );
 
@@ -267,10 +264,11 @@ final class CallProcessor
         string $utcMonth,
         string $origCallId,
         string $termCallId,
+        string $plainCallId = '',
         int $domainRowId = 0,
     ): array {
         try {
-            return $this->fetchTranscriptionOnce($domainName, $jobId, $month, $utcMonth, $origCallId, $termCallId);
+            return $this->fetchTranscriptionOnce($domainName, $jobId, $month, $utcMonth, $origCallId, $termCallId, $plainCallId);
         } catch (NsException $e) {
             if (!self::isDomainRejection($e)) {
                 throw $e;
@@ -293,7 +291,7 @@ final class CallProcessor
                 'netsapiens' => $canonical,
             ]);
 
-            return $this->fetchTranscriptionOnce($canonical, $jobId, $month, $utcMonth, $origCallId, $termCallId);
+            return $this->fetchTranscriptionOnce($canonical, $jobId, $month, $utcMonth, $origCallId, $termCallId, $plainCallId);
         }
     }
 
@@ -305,12 +303,13 @@ final class CallProcessor
         string $utcMonth,
         string $origCallId,
         string $termCallId,
+        string $plainCallId = '',
     ): array {
         try {
-            return $this->ns->transcription($domainName, $jobId, $month, $origCallId, $termCallId);
+            return $this->ns->transcription($domainName, $jobId, $month, $origCallId, $termCallId, $plainCallId);
         } catch (NsException $e) {
             if ($e->isNotFound() && $utcMonth !== '' && $utcMonth !== $month) {
-                return $this->ns->transcription($domainName, $jobId, $utcMonth, $origCallId, $termCallId);
+                return $this->ns->transcription($domainName, $jobId, $utcMonth, $origCallId, $termCallId, $plainCallId);
             }
 
             throw $e;
