@@ -283,6 +283,7 @@ final class NsClient implements NsGateway
             }
 
             $message = self::errorMessage($decoded, $status);
+            $level = $status === 404 ? 'debug' : 'warning';
 
             if ($status === 429 || $status >= 500) {
                 if ($attempt < $maxAttempts) {
@@ -291,7 +292,10 @@ final class NsClient implements NsGateway
                 }
             }
 
-            Logger::warning('netsapiens.request_failed', [
+            // A 404 is an ordinary answer here — most calls simply have no
+            // recording and no transcription row — so it is logged at debug level
+            // instead of spraying warnings over every batch run.
+            Logger::{$level}('netsapiens.request_failed', [
                 'method' => $method,
                 'path' => $path,
                 'status' => $status,

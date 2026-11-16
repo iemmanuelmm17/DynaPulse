@@ -787,7 +787,7 @@ test('calls:audit sees which identifiers the stored CDRs carry', function () use
     assertSame('555111@10.0.0.1', (string) ($raw['call-orig-call-id'] ?? ''), 'the raw CDR is kept for the audit');
 });
 
-test('A CDR without call ids is not sent to the API', function () use ($container, $fakeNs): void {
+test('A CDR without call ids is looked up by job id alone, never with the cdr- placeholder', function () use ($container, $fakeNs): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);
     $domainRepo->ensure('noids.test', 'No IDs', 'UTC');
@@ -805,14 +805,50 @@ test('A CDR without call ids is not sent to the API', function () use ($containe
     $ingest = $container->get(IngestService::class);
     $result = $ingest->ingestCdr('noids.test', $cdr, true);
 
-    assertSame($before, $fakeNs->transcriptionCalls, 'no lookup for an unidentifiable call');
+    assertSame($before + 1, $fakeNs->transcriptionCalls, 'exactly one lookup, by job id');
+
+    $query = $fakeNs->transcriptionQueries[count($fakeNs->transcriptionQueries) - 1];
+    assertSame('999001', (string) $query['job'], 'the job id is what we ask for');
+    assertSame('', (string) $query['orig'], 'no synthetic orig_callid is sent');
+    assertSame('', (string) $query['term'], 'no synthetic term_callid is sent');
+    assertSame('', (string) $query['plain'], 'no synthetic callid is sent');
 
     /** @var CallRepository $calls */
     $calls = $container->get(CallRepository::class);
     $row = $calls->find((int) $result['call_id']);
-    assertSame('unavailable', (string) $row['transcript_status']);
-    assertContains('no NetSapiens call ids', (string) $row['last_error']);
+    assertSame('pending', (string) $row['transcript_status'], 'still waiting for Call Intelligence');
     assertSame(0, (int) $row['has_transcript']);
+});
+
+test('A CDR without call ids still gets its transcript when the job id is enough', function () use ($container, $fakeNs): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domainRepo->ensure('jobonly.test', 'Job only', 'UTC');
+
+    $fakeNs->transcriptionFixtures['jobonly.test:78920299'] = [
+        'call-intelligence-processing-status' => 'finished',
+        'call-intelligence-summary' => 'Customer asked for a reboot and the agent complied.',
+        'call-intelligence-topics-top' => ['Support'],
+        'call-intelligence-segments' => [
+            ['speaker' => 'Customer', 'comment' => 'Can you reboot my modem?', 'sentiment' => 'Neutral', 'start-time' => '3', 'end-time' => '6'],
+        ],
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('jobonly.test', [
+        'domain' => 'jobonly.test',
+        'call-start-datetime' => '2026-11-16T15:56:29+00:00',
+        'call-total-duration-seconds' => 60,
+        'call-intelligence-job-id' => 78920299,
+        'call-intelligence-processing-status' => 'completed',
+    ], true);
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $row = $calls->find((int) $result['call_id']);
+    assertSame(1, (int) $row['has_transcript'], 'the transcript is stored');
+    assertContains('reboot', (string) $row['transcript_summary']);
 });
 
 test('Domains keep the NetSapiens spelling and stay unique per case', function () use ($container): void {

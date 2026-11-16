@@ -107,15 +107,32 @@ final class CallProcessor
                 $plainCallId = '';
             }
 
-            if ($effectiveJob === ''
-                || (!self::usableCallId($origCallId) && !self::usableCallId($termCallId) && $plainCallId === '')
-            ) {
-                // Nothing to ask for: the CDR had no NetSapiens call ids, so the
-                // row can only be identified by our synthetic cdr-<hash> id.
+            // Never send our own cdr-<hash> placeholder: NetSapiens answers it with
+            // 403 "Invalid domain or callids" and the whole lookup is abandoned.
+            if (!self::usableCallId($origCallId)) {
+                $origCallId = '';
+            }
+
+            if (!self::usableCallId($termCallId)) {
+                $termCallId = '';
+            }
+
+            if ($effectiveJob === '') {
+                // Nothing to ask for: without a Call Intelligence job id there is
+                // no transcription row to address, whatever the call ids say.
                 $updates['transcript_status'] = 'unavailable';
-                $updates['last_error'] = 'transcription: the CDR carried no NetSapiens call ids.';
+                $updates['last_error'] = 'transcription: the CDR carried no Call Intelligence job id.';
                 Logger::warning('processor.transcription_unidentifiable', ['call_id' => $callId]);
             } else {
+                if ($origCallId === '' && $termCallId === '' && $plainCallId === '') {
+                    // The job id alone is often enough: NetSapiens also answers
+                    // /transcriptions?id=<job>&date=YYYYMM with no callid at all.
+                    Logger::info('processor.transcription_jobid_only', [
+                        'call_id' => $callId,
+                        'job_id' => $effectiveJob,
+                    ]);
+                }
+
                 try {
                     $startedAt = trim((string) ($call['started_at'] ?? ''));
 

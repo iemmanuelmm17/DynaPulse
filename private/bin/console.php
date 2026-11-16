@@ -66,7 +66,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.14';
+const DP_CODE_BUILD = '2026.11.16.15';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -393,7 +393,7 @@ try {
             $out('  php        ' . PHP_VERSION . '  (' . PHP_SAPI . ')');
             $out('  private    ' . $base);
             $out('  database   ' . (string) $config->get('db.database', ''));
-            $out('  features   raw CDRs (raw=yes), prefilled-transcription, domain re-spelling, per-domain audit');
+            $out('  features   raw CDRs (raw=yes), prefilled-transcription, job-id-only lookup, domain re-spelling, per-domain audit');
 
             /** @var Database $versionDb */
             $versionDb = $container->get(Database::class);
@@ -916,12 +916,14 @@ try {
 
             if (!$usable($probeOrig) && !$usable($probeTerm) && !$usable($probePlain)) {
                 $out('');
-                $out('  cannot probe: the stored CDR has no usable call id — "cdr-…" is our own hash,');
-                $out('  which NetSapiens has never heard of (sending it earns a 403 "Invalid domain or callids").');
-                $out('  The CDR must be re-fetched with raw=yes for the ids to appear:');
-                $out('    php bin\console.php poll 168 --domain=' . $probeDomain);
-                $out('    php bin\console.php ns:test --domain=' . $probeDomain . ' --hours=48');
-                break;
+                $out('  no usable call id on this row — "cdr-…" is our own hash, which NetSapiens has');
+                $out('  never heard of (sending it earns a 403 "Invalid domain or callids").');
+                $out('  Probing with the job id alone (domain + id + date); several clusters answer that.');
+                $out('');
+                $out('  If it 404s, pass the id NetSapiens files the call under — it is stored with --apply:');
+                $out('    php bin\\console.php transcript:test --call=' . $callId . ' --call-id=0_2654816984@172.16.10.109 --apply');
+                $out('  A fresh raw=yes poll fills it in automatically when that CDR is in the window:');
+                $out('    php bin\\console.php poll 168 --domain=' . $probeDomain);
             }
 
             $probeOrig = $usable($probeOrig) ? $probeOrig : '';
