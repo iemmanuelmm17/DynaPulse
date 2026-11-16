@@ -631,6 +631,8 @@ try {
             $withPlain = 0;
             $frequency = [];
             $missing = [];
+            $byDomain = [];
+            $jobKeyNull = 0;
 
             foreach ($sample as $row) {
                 $raw = json_decode((string) ($row['raw_cdr'] ?? ''), true);
@@ -656,8 +658,20 @@ try {
                 $withPrefilled += $prefilled !== '' ? 1 : 0;
                 $withPlain += $plain !== '' ? 1 : 0;
 
+                if (array_key_exists('call-intelligence-job-id', $raw) && $job === '') {
+                    $jobKeyNull++;
+                }
+
+                $domainName = (string) ($row['domain_name'] ?? '');
+                $byDomain[$domainName] ??= ['calls' => 0, 'job' => 0, 'link' => 0, 'ids' => 0, 'none' => 0];
+                $byDomain[$domainName]['calls']++;
+                $byDomain[$domainName]['job'] += $job !== '' ? 1 : 0;
+                $byDomain[$domainName]['link'] += $prefilled !== '' ? 1 : 0;
+                $byDomain[$domainName]['ids'] += ($orig !== '' || $term !== '' || $plain !== '') ? 1 : 0;
+
                 if ($orig === '' && $term === '' && $prefilled === '' && $plain === '') {
                     $missing[] = ['row' => $row, 'raw' => $raw];
+                    $byDomain[$domainName]['none']++;
                 }
             }
 
@@ -676,6 +690,34 @@ try {
             $out(sprintf('    no id of any kind         %5d  %s', count($missing), $percent(count($missing))));
             $out('');
             $out(sprintf('  transcripts marked unavailable across the table: %d', $unavailable));
+
+            if ($jobKeyNull > 0) {
+                $out(sprintf('  call-intelligence-job-id is present but empty on %d of %d CDR(s)', $jobKeyNull, $count));
+            }
+
+            if ($byDomain !== []) {
+                uasort($byDomain, static fn (array $a, array $b): int => $b['calls'] <=> $a['calls']);
+                $out('');
+                $out('  per domain');
+                $out(sprintf('    %-30s %5s  %6s %6s %6s %6s', 'domain', 'calls', 'job id', 'link', 'ids', 'none'));
+
+                foreach ($byDomain as $domainName => $stats) {
+                    $pct = static fn (int $part): string => sprintf(
+                        '%3d%%',
+                        $stats['calls'] > 0 ? (int) round($part * 100 / $stats['calls']) : 0,
+                    );
+
+                    $out(sprintf(
+                        '    %-30s %5d  %6s %6s %6s %6s',
+                        $domainName !== '' ? $domainName : '(no domain)',
+                        $stats['calls'],
+                        $pct($stats['job']),
+                        $pct($stats['link']),
+                        $pct($stats['ids']),
+                        $pct($stats['none']),
+                    ));
+                }
+            }
 
             if ($frequency !== []) {
                 arsort($frequency);
@@ -723,28 +765,64 @@ try {
             $out('');
             $out('  what this means');
 
-            $fixable = $count - count($missing);
+            $jobless = [];
 
-            if ($fixable > 0) {
-                $out(sprintf('    %d call(s) carry a usable identifier — reprocess repairs those:', $fixable));
-                $out('      php bin/console.php calls:reprocess --limit=100');
-            }
-
-            if ($missingEmpty > 0) {
-                $out(sprintf('    %d call(s) kept no raw CDR at all: nothing can be recovered from them.', $missingEmpty));
-                $out('    Re-ingest the window to store the payloads: php bin/console.php poll 72');
-            }
-
-            if ($missingWithRaw > 0) {
-                $out(sprintf('    %d call(s) kept their CDR, but it carries no call id NetSapiens accepts', $missingWithRaw));
-                $out('    (only id / call-intelligence-job-id). Check a brand new call first:');
-                $out('      php bin/console.php poll 2   then   php bin/console.php calls:audit --show=1');
-                $out('    If the fresh CDR also lacks call-orig-call-id / prefilled-transcription-api,');
-                $out('    the API key is getting an older CDR shape — send that payload to adapt to it.');
+            foreach ($byDomain as $domainName => $stats) {
+                if ($stats['job'] === 0) {
+                    $jobless[$domainName] = $stats['calls'];
+                }
             }
 
             if ($missing === []) {
-                break;
+                $out('    Every sampled CDR carries an identifier — reprocess picks them up:');
+                $out('      php bin/console.php calls:reprocess --limit=100');
+            }
+
+            if ($jobless !== []) {
+                $out('    Call Intelligence produced no job id for these calls, so NetSapiens has no');
+                $out('    transcript to fetch at all — nothing in the CDR can be used:');
+
+                foreach ($jobless as $domainName => $calls) {
+                    $out(sprintf('      %s — %d call(s)', $domainName !== '' ? $domainName : '(no domain)', $calls));
+                }
+
+                $out('');
+                $out('    In NetSapiens, check for each of those domains that Call Intelligence');
+                $out('    (recording transcription) is enabled, and that the calls actually have');
+                $out('    recordings. A domain where it works has a non-null call-intelligence-job-id');
+                $out('    and a prefilled-transcription-api on the CDR — compare with');
+                $out('      php bin/console.php calls:audit --limit=50 --show=0   (after a new call)');
+            }
+
+            $guessed = [];
+
+            foreach ($byDomain as $domainName => $stats) {
+                if ($stats['job'] > 0 && $stats['link'] === 0) {
+                    $guessed[$domainName] = $stats['calls'];
+                }
+            }
+
+            if ($guessed !== []) {
+                $out('');
+                $out('    These domains have job ids but no prefilled-transcription-api, so the lookup');
+                $out('    is built from the CDR fields — verify one by hand:');
+
+                foreach (array_keys($guessed) as $domainName) {
+                    $out('      php bin/console.php transcript:test --call=<id of a ' . $domainName . ' call>');
+                }
+            }
+
+            $empty = 0;
+
+            foreach ($missing as $entry) {
+                if ($entry['raw'] === []) {
+                    $empty++;
+                }
+            }
+
+            if ($empty > 0) {
+                $out('');
+                $out(sprintf('    %d call(s) kept no raw CDR at all: re-ingest with %s', $empty, 'php bin/console.php poll 72'));
             }
 
             break;
