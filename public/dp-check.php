@@ -59,8 +59,11 @@ if (is_file($override)) {
 
 $candidates[] = dirname($publicRoot) . DIRECTORY_SEPARATOR . 'private';
 $candidates[] = dirname($publicRoot, 3) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'DynaPulse';
+$candidates[] = dirname($publicRoot, 3) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'dynapulse';
 $candidates[] = dirname($publicRoot, 2) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'DynaPulse';
+$candidates[] = dirname($publicRoot, 2) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'dynapulse';
 $candidates[] = dirname($publicRoot) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'DynaPulse';
+$candidates[] = dirname($publicRoot) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'dynapulse';
 
 $privatePath = null;
 $searched = [];

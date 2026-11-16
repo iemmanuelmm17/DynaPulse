@@ -23,6 +23,10 @@ if (is_file($override)) {
 }
 
 $candidates[] = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'private';           // repo / dev layout
+// D:\www\dynapulse\public -> D:\private\dynapulse (Windows is case-insensitive,
+// both spellings are listed so the same files work on Linux/macOS too).
+$candidates[] = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'DynaPulse';
+$candidates[] = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'dynapulse';
 $candidates[] = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'DynaPulse'; // D:\private\DynaPulse
 $candidates[] = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'DynaPulse';
 
