@@ -15,24 +15,41 @@ if (!function_exists('e')) {
 }
 
 if (!function_exists('url')) {
+    /** Absolute URL (for e-mail links and API callbacks). */
     function url(string $path = '/'): string
     {
         if (str_starts_with($path, 'http://') || str_starts_with($path, 'https://')) {
             return $path;
         }
 
-        $base = (string) Context::config('app.url', '');
-        $base = $base !== '' ? rtrim($base, '/') : '';
+        $base = rtrim((string) Context::config('app.url', ''), '/');
 
-        return $base . '/' . ltrim($path, '/');
+        if ($base === '') {
+            // No APP_URL configured: derive it from the current request so the
+            // links still point at the right host and sub-folder.
+            $request = Context::$request;
+            $host = $request?->header('host') ?? (string) ($_SERVER['HTTP_HOST'] ?? '');
+
+            if ($host !== '') {
+                $base = ($request?->isSecure() ? 'https://' : 'http://') . $host;
+            }
+        }
+
+        return $base . path_url($path);
     }
 }
 
 if (!function_exists('path_url')) {
-    /** Relative URL, safe behind any reverse proxy / subfolder. */
+    /**
+     * Root-relative URL that includes the sub-folder the portal is served from,
+     * so it is safe behind any reverse proxy or inside /dynapulse/public.
+     */
     function path_url(string $path = '/'): string
     {
-        return '/' . ltrim($path, '/');
+        $base = Context::basePath();
+        $path = ltrim($path, '/');
+
+        return $path === '' ? $base . '/' : $base . '/' . $path;
     }
 }
 

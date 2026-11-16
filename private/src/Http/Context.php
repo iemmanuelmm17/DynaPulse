@@ -26,8 +26,43 @@ final class Context
     /** Per-request nonce for the few inline scripts the layout needs. */
     public static string $cspNonce = '';
 
+    /**
+     * URL prefix the portal is served from, e.g. "/dynapulse/public".
+     * Empty string when the public folder is the site root.
+     */
+    public static string $basePath = '';
+
     /** @var list<array<string, mixed>> Domains available to the domain switcher (admins). */
     public static array $domains = [];
+
+    public static function basePath(): string
+    {
+        return self::$basePath;
+    }
+
+    public static function setBasePath(string $basePath): void
+    {
+        self::$basePath = self::normaliseBasePath($basePath);
+    }
+
+    /** "/dynapulse/public/" and "/dynapulse/public/index.php" both become "/dynapulse/public". */
+    public static function normaliseBasePath(string $basePath): string
+    {
+        $basePath = trim(str_replace('\\', '/', $basePath));
+
+        if ($basePath === '' || $basePath === '/' || $basePath === '.') {
+            return '';
+        }
+
+        if (!str_starts_with($basePath, '/')) {
+            $basePath = '/' . $basePath;
+        }
+
+        $basePath = (string) preg_replace('#/index\.php$#i', '', $basePath);
+        $basePath = rtrim((string) preg_replace('#/+#', '/', $basePath), '/');
+
+        return $basePath === '/' ? '' : $basePath;
+    }
 
     public static function config(string $key, mixed $default = null): mixed
     {

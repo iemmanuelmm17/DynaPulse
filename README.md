@@ -52,13 +52,13 @@ MIME builder and XLSX writer. `composer.json` only defines PSR-4 autoloading for
 ## Architecture
 
 ```
-D:\www\DynaPulse\public          <- IIS site root (document root)
+D:\www\dynapulse\public          <- document root (or a sub-folder of the site)
 ├── index.php                    <- front controller
 ├── web.config                   <- rewrite rules, security headers
 ├── favicon.svg
 └── assets\{css,js}
 
-D:\private\DynaPulse             <- application (outside the web root)
+D:\private\dynapulse             <- application (outside the web root)
 ├── .env                         <- secrets (never served)
 ├── bootstrap.php                <- Env → Config → Logger → DB → Container
 ├── routes.php
@@ -107,12 +107,39 @@ folder, e.g.
 
 (You can also set the `DYN_PULSE_PRIVATE` environment variable in IIS.)
 
+### Sub-folder deployments
+
+`public\` does not have to be a site root. If the site root is `D:\www` and DynaPulse lives in
+`D:\www\dynapulse\public`, the portal is simply reached at `http://<server>/dynapulse/public/`.
+
+The URL prefix is detected automatically from `DOCUMENT_ROOT` / `SCRIPT_FILENAME`, and every link,
+form action, asset, redirect, cookie path and e-mail URL is generated with that prefix, so both
+layouts work without configuration:
+
+```
+Site root deployment                     Sub-folder deployment
+D:\www\dynapulse\public   ->  /          D:\www                    ->  /
+                                         D:\www\dynapulse\public   ->  /dynapulse/public/
+```
+
+If the web server hides that information (a reverse proxy that rewrites the path, for example), pin
+it explicitly with `public\base_path.php`:
+
+```php
+<?php return '/dynapulse/public';
+```
+
+The `DYN_PULSE_BASE` environment variable does the same thing. `dp-check.php` shows the detected
+prefix under *Request → URL prefix*.
+
 ### 2. Configure IIS
 
-Create the site with **Physical path** `D:\www\DynaPulse\public`. Install the *URL Rewrite* module.
-`web.config` already:
+Create the site with **Physical path** `D:\www\DynaPulse\public` (or point it at the parent folder
+for a sub-folder deployment). Install the *URL Rewrite* module. `web.config` already:
 
-- forces HTTPS (except localhost),
+- blocks dotfiles and database/log/backup extensions,
+- optionally forces HTTPS (the rule ships commented out, because a server reached by IP address
+  usually has no certificate — uncomment it once the site has a TLS binding),
 - blocks dotfiles and database/log/backup extensions,
 - rewrites every non-file request to `index.php`,
 - sets MIME types for `.svg`/`.woff2` and 7-day static caching.
@@ -292,6 +319,7 @@ php bin\console.php process --limit=10 --budget=45
 | Symptom | Likely cause / fix |
 |---|---|
 | “DynaPulse cannot find its private folder” | Create `public\private_path.php` with the absolute private path, or set `DYN_PULSE_PRIVATE`. |
+| “Page not found” on the address you opened | The address must include the portal folder, e.g. `http://server/dynapulse/public/`. Open `dp-check.php` and compare *Request → URL prefix* with the address in the browser. |
 | Login says credentials were not accepted | `NS_CLIENT_ID`/`NS_CLIENT_SECRET` wrong, or the NetSapiens user lacks API scope. Check `storage\logs`. |
 | Emails never arrive | SMTP AUTH disabled on the mailbox, wrong app password, or `MAIL_FROM_ADDRESS` not matching the sender. Use *Send test*. |
 | Alerts show “Email not configured” | `MAIL_*` values missing in `.env`; the portal logs `alert.blocked`. |

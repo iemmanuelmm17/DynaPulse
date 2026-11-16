@@ -16,6 +16,8 @@ use DynaPulse\Database\Database;
 use DynaPulse\Database\Migrator;
 use DynaPulse\Http\Container;
 use DynaPulse\Http\Context;
+use DynaPulse\Http\Request;
+use DynaPulse\Http\Response;
 use DynaPulse\Http\View;
 use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsGateway;
@@ -336,6 +338,76 @@ test('Ingestion → processing → alert queue end to end', function () use ($co
     $database = $container->get(\DynaPulse\Database\Database::class);
     $counts = $database->first('SELECT COUNT(*) AS total FROM calls WHERE domain_id = :d', ['d' => $domainId]);
     assertSame(1, (int) ($counts['total'] ?? 0), 'duplicate CDRs must merge on the call id');
+});
+
+/* ------------------------------------------------------------------------- */
+/* sub-folder deployment (/dynapulse/public)                                 */
+/* ------------------------------------------------------------------------- */
+
+test('Request strips the sub-folder prefix before routing', function (): void {
+    assertSame('', Context::normaliseBasePath('/'));
+    assertSame('', Context::normaliseBasePath(''));
+    assertSame('/dynapulse/public', Context::normaliseBasePath('/dynapulse/public/'));
+    assertSame('/dynapulse/public', Context::normaliseBasePath('/dynapulse/public/index.php'));
+    assertSame('/DynaPulse/Public', Context::normaliseBasePath('\\DynaPulse\\Public\\'));
+
+    assertSame('/calls/12', Request::stripBasePath('/dynapulse/public/calls/12', '/dynapulse/public'));
+    assertSame('/', Request::stripBasePath('/dynapulse/public', '/dynapulse/public'));
+    assertSame('/calls', Request::stripBasePath('/calls', ''));
+    assertSame('/public/calls', Request::stripBasePath('/public/calls', '/dynapulse/public'));
+
+    $request = new Request('GET', '/calls', [], [], [], [], [], '', '/dynapulse/public');
+    assertSame('/calls', $request->path());
+    assertSame('/dynapulse/public', $request->basePath());
+});
+
+test('Request detects the sub-folder from the server variables', function (): void {
+    $server = $_SERVER;
+
+    try {
+        $_SERVER['DOCUMENT_ROOT'] = '/srv/www';
+        $_SERVER['SCRIPT_FILENAME'] = '/srv/www/dynapulse/public/index.php';
+        $_SERVER['SCRIPT_NAME'] = '/dynapulse/public/index.php';
+        $_SERVER['PHP_SELF'] = '/dynapulse/public/index.php';
+
+        assertSame('/dynapulse/public', Request::detectBasePath('/dynapulse/public/calls'));
+        assertSame('/dynapulse/public', Request::detectBasePath('/dynapulse/public/'));
+
+        // Site root deployment: nothing is stripped.
+        $_SERVER['DOCUMENT_ROOT'] = '/srv/www/dynapulse/public';
+        $_SERVER['SCRIPT_FILENAME'] = '/srv/www/dynapulse/public/index.php';
+        $_SERVER['SCRIPT_NAME'] = '/index.php';
+        $_SERVER['PHP_SELF'] = '/index.php';
+        assertSame('', Request::detectBasePath('/calls'));
+
+        // IIS sometimes echoes the routed URL in SCRIPT_NAME; that must not be
+        // mistaken for a prefix.
+        $_SERVER['DOCUMENT_ROOT'] = '';
+        $_SERVER['SCRIPT_FILENAME'] = '';
+        $_SERVER['SCRIPT_NAME'] = '/login';
+        $_SERVER['PHP_SELF'] = '/login';
+        assertSame('', Request::detectBasePath('/login'));
+    } finally {
+        $_SERVER = $server;
+    }
+});
+
+test('Links, assets and redirects keep the sub-folder', function (): void {
+    Context::setBasePath('/dynapulse/public');
+
+    try {
+        assertSame('/dynapulse/public/', path_url(''));
+        assertSame('/dynapulse/public/login', path_url('login'));
+        assertSame('/dynapulse/public/login', Response::redirect('/login')->headers()['Location']);
+        assertSame('/dynapulse/public/calls', Response::redirect('/dynapulse/public/calls')->headers()['Location']);
+        assertSame('https://elsewhere.test/x', Response::redirect('https://elsewhere.test/x')->headers()['Location']);
+        assertContains('/dynapulse/public/assets/css/app.css', asset('css/app.css'));
+    } finally {
+        Context::setBasePath('');
+    }
+
+    assertSame('/login', Response::redirect('/login')->headers()['Location']);
+    assertSame('/', path_url(''));
 });
 
 /* ------------------------------------------------------------------------- */

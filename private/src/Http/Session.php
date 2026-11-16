@@ -35,9 +35,12 @@ final class Session
         }
 
         session_name($this->name);
+        $basePath = Context::basePath();
+
         session_set_cookie_params([
             'lifetime' => 0,
-            'path' => '/',
+            // Scoped to the sub-folder when the portal is not at the site root.
+            'path' => $basePath === '' ? '/' : $basePath . '/',
             'httponly' => true,
             'samesite' => 'Lax',
             'secure' => $this->secure,

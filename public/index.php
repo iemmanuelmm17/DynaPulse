@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 /**
  * DynaPulse front controller.
- * Deploy this folder as the site root: D:\www\DynaPulse\public
+ *
+ * Deploy this folder as a site root (D:\www\dynapulse\public) or as a sub-folder
+ * of an existing site (http://host/dynapulse/public). The URL prefix is detected
+ * automatically; public/base_path.php can override it when the web server does
+ * not report it (e.g. behind a proxy that rewrites the path).
  */
 
 // 1. optional override file (next to index.php) that returns an absolute path
@@ -19,6 +23,15 @@ if (is_file($override)) {
     $value = require $override;
     if (is_string($value) && $value !== '') {
         $candidates[] = $value;
+    }
+}
+
+// 1b. optional URL-prefix override, e.g. return '/dynapulse/public';
+$baseOverride = __DIR__ . DIRECTORY_SEPARATOR . 'base_path.php';
+if (is_file($baseOverride)) {
+    $value = require $baseOverride;
+    if (is_string($value)) {
+        putenv('DYN_PULSE_BASE=' . $value);
     }
 }
 

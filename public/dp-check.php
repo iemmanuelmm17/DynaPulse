@@ -163,6 +163,26 @@ if ($privatePath !== null) {
 
 $base = $_SERVER['DOCUMENT_ROOT'] ?? '';
 $uri = $_SERVER['REQUEST_URI'] ?? '';
+
+/* ----------------------------------------------------------- URL prefix */
+// Same idea as DynaPulse\Http\Request: the folder below the document root is
+// the URL prefix the portal is reachable at (/dynapulse/public for example).
+$docRoot = rtrim(str_replace('\\', '/', (string) $base), '/');
+$scriptFile = str_replace('\\', '/', (string) ($_SERVER['SCRIPT_FILENAME'] ?? ''));
+$scriptName = (string) ($_SERVER['SCRIPT_NAME'] ?? '');
+$urlPrefix = '';
+
+if ($docRoot !== '' && $scriptFile !== '') {
+    $scriptDir = rtrim(str_replace('\\', '/', dirname($scriptFile)), '/');
+    if (stripos($scriptDir, $docRoot . '/') === 0) {
+        $urlPrefix = substr($scriptDir, strlen($docRoot));
+    }
+}
+
+$uriPath = '/' . trim(rawurldecode((string) (parse_url($uri, PHP_URL_PATH) ?: '/')), '/');
+$prefixMatches = $uriPath === ($urlPrefix === '' ? '' : $urlPrefix)
+    || str_starts_with($uriPath, ($urlPrefix === '' ? '' : $urlPrefix) . '/')
+    || $uriPath === '/';
 $rewriteInstalled = in_array('mod_rewrite', function_exists('apache_get_modules') ? apache_get_modules() : [], true);
 
 $e = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
@@ -211,6 +231,12 @@ $e = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_Q
             <?php endforeach; ?>
         </table>
 
+        <?php if (!$prefixMatches): ?>
+            <p class="note">The browser opened <span class="mono"><?= $e($uriPath) ?></span>, which is not inside the portal folder
+                <span class="mono"><?= $e($urlPrefix) ?></span>. Open
+                <span class="mono"><?= $e($urlPrefix === '' ? '' : $urlPrefix) ?>/</span> instead and the links will line up.</p>
+        <?php endif; ?>
+
         <?php if ($privatePath !== null && (!isset($_GET['boot']) || $_GET['boot'] !== '1')): ?>
             <a class="btn" href="?boot=1">Run a full bootstrap test</a>
         <?php endif; ?>
@@ -222,6 +248,8 @@ $e = static fn (mixed $value): string => htmlspecialchars((string) $value, ENT_Q
             <tr><td class="label">Document root</td><td><span class="mono"><?= $e($base) ?></span></td></tr>
             <tr><td class="label">Request URI</td><td><span class="mono"><?= $e($uri) ?></span></td></tr>
             <tr><td class="label">Private folders searched</td><td><span class="mono"><?= $e(implode(' | ', array_unique($searched))) ?></span></td></tr>
+            <tr><td class="label">Script name</td><td><span class="mono"><?= $e($scriptName !== '' ? $scriptName : 'not reported') ?></span></td></tr>
+            <tr><td class="label">URL prefix</td><td><span class="mono <?= $prefixMatches ? '' : 'warn' ?>"><?= $e($urlPrefix === '' ? 'served from the site root ( / )' : $urlPrefix) ?></span></td></tr>
             <tr><td class="label">Apache mod_rewrite</td><td><?= $rewriteInstalled ? 'detected' : 'not detectable here (IIS uses URL Rewrite instead)' ?></td></tr>
         </table>
     </div>

@@ -37,7 +37,32 @@ final class Response
 
     public static function redirect(string $location, int $status = 303): self
     {
-        return (new self('', $status))->withHeader('Location', $location);
+        return (new self('', $status))->withHeader('Location', self::withBasePath($location));
+    }
+
+    /** Keep redirects inside the sub-folder the portal is served from. */
+    private static function withBasePath(string $location): string
+    {
+        if ($location === '') {
+            return Context::basePath() . '/';
+        }
+
+        // Absolute URLs, protocol-relative URLs and fragments are left alone.
+        if (preg_match('#^([a-z][a-z0-9+.-]*:|//|\#)#i', $location) === 1) {
+            return $location;
+        }
+
+        $base = Context::basePath();
+
+        if ($base === '') {
+            return str_starts_with($location, '/') ? $location : '/' . $location;
+        }
+
+        if ($location === $base || str_starts_with($location, $base . '/')) {
+            return $location;
+        }
+
+        return $base . '/' . ltrim($location, '/');
     }
 
     public static function noContent(): self

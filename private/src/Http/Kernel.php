@@ -45,6 +45,7 @@ final class Kernel
         Context::$user = null;
         Context::$domainRow = null;
         Context::$cspNonce = base64_encode(random_bytes(18));
+        Context::setBasePath($request->basePath());
 
         $this->session->start();
         $this->resolveUser();
@@ -171,7 +172,7 @@ final class Kernel
                 . '<div style="font-family:system-ui;padding:48px;max-width:640px;margin:auto">'
                 . '<h1>' . htmlspecialchars($title, ENT_QUOTES) . '</h1>'
                 . '<p>' . htmlspecialchars($message, ENT_QUOTES) . '</p>'
-                . '<p><a href="/">Back to DynaPulse</a></p></div>',
+                . '<p><a href="' . htmlspecialchars(path_url(''), ENT_QUOTES) . '">Back to DynaPulse</a></p></div>',
                 $status,
             );
         }
