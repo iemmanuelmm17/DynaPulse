@@ -12,6 +12,7 @@ declare(strict_types=1);
  *   php private/bin/console.php calls:reprocess [--limit=50]
  *   php private/bin/console.php calls:audit [--limit=500] [--show=3]
  *   php private/bin/console.php calls:find --job=78920299
+ *   php private/bin/console.php calls:dupes [--fix]
  *   php private/bin/console.php domains:sync
  *   php private/bin/console.php poll [hours]
  *   php private/bin/console.php process [--limit=25] [--budget=50] [--call=ID]
@@ -65,7 +66,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.10';
+const DP_CODE_BUILD = '2026.11.16.11';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -421,6 +422,7 @@ try {
             $out('  calls:reprocess [--limit]     retry calls that have a job id but no stored transcript');
             $out('  calls:audit [--limit] [--show] which identifiers the stored CDRs actually carry');
             $out('  calls:find --id= --job= --number=   locate a call by portal id, job id or number');
+            $out('  calls:dupes [--fix]           find (and collapse) the same call stored twice');
             $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
             $out('                                add --call=ID to process one call and print the outcome');
@@ -984,6 +986,88 @@ try {
                 $out('  matches             ' . (int) ($fresh['match_count'] ?? 0));
                 $out('  last_error          ' . ((string) ($fresh['last_error'] ?? '') !== '' ? (string) $fresh['last_error'] : '—'));
             }
+            break;
+
+        case 'calls:dupes':
+            /** @var Database $dupeDb */
+            $dupeDb = $container->get(Database::class);
+            $groups = $dupeDb->select(
+                "SELECT domain_id, transcript_job_id, COUNT(*) AS n, MIN(id) AS first_id,
+                        MAX(has_transcript) AS has_transcript
+                   FROM calls
+                  WHERE transcript_job_id <> ''
+                  GROUP BY domain_id, transcript_job_id
+                 HAVING COUNT(*) > 1
+                  ORDER BY n DESC
+                  LIMIT " . $number('limit', 50, 1, 500),
+            );
+
+            if ($groups === []) {
+                $out('No duplicates: every Call Intelligence job id maps to one call.');
+                break;
+            }
+
+            $fix = $option('fix') !== null;
+            $involved = 0;
+            $removed = 0;
+
+            $out(count($groups) . ' duplicate group(s) — the same call stored more than once:');
+
+            foreach ($groups as $group) {
+                $rows = $dupeDb->select(
+                    'SELECT id, call_id, has_transcript, attempts, status FROM calls
+                      WHERE domain_id = :d AND transcript_job_id = :j
+                      ORDER BY has_transcript DESC, attempts DESC, id ASC',
+                    ['d' => (int) $group['domain_id'], 'j' => (string) $group['transcript_job_id']],
+                );
+
+                $ids = array_map(static fn (array $row): int => (int) $row['id'], $rows);
+                $keeper = (int) ($ids[0] ?? 0);
+                $involved += count($ids);
+
+                $out('');
+                $out(sprintf(
+                    '  job %-12s %2d row(s)  keep #%d  %s',
+                    (string) $group['transcript_job_id'],
+                    count($ids),
+                    $keeper,
+                    implode(', ', array_map(static fn (int $id): string => '#' . $id, $ids)),
+                ));
+
+                if ((int) $group['has_transcript'] === 1) {
+                    $out('    the keeper has a stored transcript');
+                }
+
+                if (!$fix) {
+                    continue;
+                }
+
+                $dupeDb->transaction(function () use ($dupeDb, $ids, $keeper, &$removed): void {
+                    foreach ($ids as $id) {
+                        if ($id === $keeper) {
+                            continue;
+                        }
+
+                        // Alerts belong to the call, not the row: move them over.
+                        $dupeDb->execute('UPDATE matches SET call_id = :k WHERE call_id = :d', ['k' => $keeper, 'd' => $id]);
+                        $dupeDb->execute('DELETE FROM notifications WHERE call_id = :d', ['d' => $id]);
+                        $dupeDb->execute('DELETE FROM calls WHERE id = :d', ['d' => $id]);
+                        $removed++;
+                    }
+                });
+            }
+
+            $out('');
+            $out($fix
+                ? 'Removed ' . $removed . ' duplicate row(s) from ' . count($groups) . ' group(s).'
+                : count($groups) . ' group(s), ' . $involved . ' row(s) involved. Re-run with --fix to collapse them.');
+
+            if (!$fix) {
+                $out('  Keeping the row that has a transcript (else the most attempts, else the oldest id),');
+                $out('  moving its matches over and deleting the rest. Ids in old links stop working —');
+                $out('  use calls:find --job=<id> to get the surviving one.');
+            }
+
             break;
 
         case 'calls:find':
