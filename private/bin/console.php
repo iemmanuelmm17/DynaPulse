@@ -17,6 +17,8 @@ declare(strict_types=1);
  *   php private/bin/console.php notify [--limit=20]
  *   php private/bin/console.php reports:run
  *   php private/bin/console.php prune
+ *   php private/bin/console.php repair [--hours=168] [--limit=200]
+ *   php private/bin/console.php version
  *   php private/bin/console.php status
  *   php private/bin/console.php subscription:create [--scope=domain]
  *   php private/bin/console.php test-mail --to=you@example.com
@@ -55,6 +57,8 @@ if (PHP_SAPI !== 'cli') {
 }
 
 $base = dirname(__DIR__);
+$build = trim((string) @file_get_contents($base . DIRECTORY_SEPARATOR . 'VERSION'));
+$build = $build !== '' ? $build : 'unknown';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -73,6 +77,47 @@ foreach (array_slice($argv, 2) as $argument) {
     } else {
         $arguments[] = $argument;
     }
+}
+
+/**
+ * Re-read the call ids / job id out of a stored CDR. Returns true when the row
+ * had to be changed, so both `calls:reprocess` and `repair` can report it.
+ *
+ * @param array<string, mixed> $row
+ */
+function dp_repair_identifiers(CallRepository $calls, int $id, array $row): bool
+{
+    $rawCdr = json_decode((string) ($row['raw_cdr'] ?? '{}'), true);
+    $rawCdr = is_array($rawCdr) ? $rawCdr : [];
+
+    if ($rawCdr === []) {
+        return false;
+    }
+
+    $storedOrig = trim((string) ($row['orig_call_id'] ?? ''));
+    $storedTerm = trim((string) ($row['term_call_id'] ?? ''));
+    $storedJob = trim((string) ($row['transcript_job_id'] ?? ''));
+
+    $reference = TranscriptionReference::fromCdr($rawCdr);
+    $mapped = CdrMapper::map($rawCdr, (string) ($row['domain_name'] ?? ''));
+    $orig = trim((string) $mapped['orig_call_id']);
+    $term = trim((string) ($mapped['term_call_id'] ?? ''));
+    $job = trim($reference?->jobId ?? (string) ($mapped['transcript_job_id'] ?? ''));
+
+    if ($orig === '' || str_starts_with($orig, 'cdr-')) {
+        return false;
+    }
+
+    $termChanged = $term !== '' && $term !== $storedTerm;
+    $jobChanged = $job !== '' && $job !== $storedJob;
+
+    if ($orig === $storedOrig && !$termChanged && !$jobChanged) {
+        return false;
+    }
+
+    $calls->patchIdentifiers($id, $orig, $term, $job);
+
+    return true;
 }
 
 $option = static fn (string $name, ?string $default = null): ?string => $options[$name] ?? $default;
@@ -116,10 +161,31 @@ $writeEnv = static function (string $file, string $key, string $value): bool {
 
 try {
     switch ($command) {
+        case 'version':
+        case '--version':
+            $out('DynaPulse build ' . $build);
+            $out('  php        ' . PHP_VERSION . '  (' . PHP_SAPI . ')');
+            $out('  private    ' . $base);
+            $out('  database   ' . (string) $config->get('db.database', ''));
+            $out('  features   raw CDRs (raw=yes), prefilled-transcription, domain re-spelling, per-domain audit');
+
+            /** @var Database $versionDb */
+            $versionDb = $container->get(Database::class);
+
+            try {
+                $calls = (int) (($versionDb->first('SELECT COUNT(*) AS n FROM calls') ?? [])['n'] ?? 0);
+                $domains = (int) (($versionDb->first('SELECT COUNT(*) AS n FROM domains') ?? [])['n'] ?? 0);
+                $out('  stored     ' . $calls . ' call(s), ' . $domains . ' domain(s)');
+            } catch (Throwable $e) {
+                $out('  stored     database not migrated yet — run: php bin/console.php migrate');
+            }
+
+            break;
+
         case 'help':
         case '--help':
         case '-h':
-            $out('DynaPulse console');
+            $out('DynaPulse console — build ' . $build);
             $out('');
             $out('  migrate                       apply pending database migrations');
             $out('  key:generate [--force]        write a random APP_KEY into .env');
@@ -134,7 +200,9 @@ try {
             $out('  notify [--limit]              send queued alert emails');
             $out('  reports:run                   send report schedules that are due');
             $out('  prune                         delete records older than the retention window');
+            $out('  repair [--hours] [--limit]    poll, audit, retry the transcripts, drain the queue');
             $out('  status                        print counters and the last poll outcome');
+            $out('  version                       print this build and what it supports');
             $out('  subscription:create [--scope] create the NetSapiens cdr event subscription');
             $out('  test-mail --to=EMAIL          send an SMTP test through the Outlook mailbox');
             break;
@@ -269,7 +337,7 @@ try {
                 return $row === null || $row === [] ? 0 : (int) array_values($row)[0];
             };
 
-            $out('DynaPulse status — ' . Time::now());
+            $out('DynaPulse status — ' . Time::now() . '   (build ' . $build . ')');
             $out(sprintf('  domains            %d (%d pollable)', $count('SELECT COUNT(*) FROM domains'), $count('SELECT COUNT(*) FROM domains WHERE enabled = 1 AND poll_enabled = 1')));
             $out(sprintf('  calls              %d', $count('SELECT COUNT(*) FROM calls')));
             $out(sprintf('    pending          %d', $count("SELECT COUNT(*) FROM calls WHERE status = 'pending'")));
@@ -605,16 +673,126 @@ try {
             }
             break;
 
+        case 'repair':
+            $hours = (int) $number('hours', 168, 1, 8760);
+            $limit = (int) $number('limit', 200, 1, 500);
+
+            /** @var IngestService $repairIngest */
+            $repairIngest = $container->get(IngestService::class);
+            /** @var CallRepository $repairCalls */
+            $repairCalls = $container->get(CallRepository::class);
+            /** @var CallProcessor $repairProcessor */
+            $repairProcessor = $container->get(CallProcessor::class);
+
+            $out('DynaPulse repair — build ' . $build);
+            $out('  Re-fetching ' . $hours . 'h of CDRs (raw=yes), then auditing, retrying the transcripts and');
+            $out('  draining the queue. Safe to re-run.');
+            $out('');
+
+            $out('[1/4] poll ' . $hours);
+            $polled = $repairIngest->pollAll($hours);
+            $out(sprintf(
+                '      %d CDR row(s) seen across %d domain(s), %d error(s).',
+                (int) $polled['calls'],
+                (int) $polled['polled'],
+                count($polled['errors']),
+            ));
+
+            foreach ($polled['errors'] as $error) {
+                $out('      ! ' . $error);
+            }
+
+            $coverage = $repairCalls->transcriptCoverage(300);
+            $sampled = max(1, (int) $coverage['sampled']);
+            $ratio = static fn (int $part): string => sprintf('%3d%%', (int) round($part * 100 / $sampled));
+
+            $out('');
+            $out('[2/4] identifiers on the ' . (int) $coverage['sampled'] . ' newest CDR(s)');
+            $out('      call-orig-call-id       ' . $ratio($coverage['orig']));
+            $out('      call-term-call-id       ' . $ratio($coverage['term']));
+            $out('      call-intelligence-job   ' . $ratio($coverage['job']));
+            $out('      prefilled link          ' . $ratio($coverage['prefilled']));
+            $out('      plain call-id           ' . $ratio($coverage['plain']));
+
+            uasort($coverage['by_domain'], static fn (array $a, array $b): int => $b['calls'] <=> $a['calls']);
+
+            foreach ($coverage['by_domain'] as $domainName => $stats) {
+                $domainPct = static fn (int $part): string => sprintf(
+                    '%3d%%',
+                    $stats['calls'] > 0 ? (int) round($part * 100 / $stats['calls']) : 0,
+                );
+
+                $out(sprintf(
+                    '      %-28s job %s  link %s  ids %s  (%d calls)',
+                    $domainName !== '' ? $domainName : '(no domain)',
+                    $domainPct($stats['job']),
+                    $domainPct($stats['link']),
+                    $domainPct($stats['ids']),
+                    $stats['calls'],
+                ));
+            }
+
+            $out('');
+            $out('[3/4] calls:reprocess --limit=' . $limit);
+            $ids = $repairCalls->idsWithoutTranscript($limit);
+
+            if ($ids === []) {
+                $out('      nothing to retry.');
+            }
+
+            $recovered = 0;
+
+            foreach ($ids as $id) {
+                $before = $repairCalls->find($id);
+
+                if ($before !== null && dp_repair_identifiers($repairCalls, $id, $before)) {
+                    $out('      #' . $id . ' repaired the call ids / job id from the stored CDR');
+                }
+
+                $repairProcessor->process($id, true);
+                $after = $repairCalls->find($id) ?? [];
+
+                if ((int) ($after['has_transcript'] ?? 0) === 1) {
+                    $recovered++;
+                }
+            }
+
+            $out(sprintf('      %d of %d transcript(s) recovered.', $recovered, count($ids)));
+
+            $out('');
+            $out('[4/4] process --limit=' . $limit);
+            $worked = $repairProcessor->work($limit, 55);
+            $out(sprintf(
+                '      %d processed, %d scheduled for retry, %d failed, %d skipped.',
+                (int) $worked['processed'],
+                (int) $worked['retry'],
+                (int) $worked['failed'],
+                (int) $worked['skipped'],
+            ));
+
+            $out('');
+            $out('Done. Reload the Calls page.');
+
+            if ((int) $coverage['orig'] === 0 && (int) $coverage['prefilled'] === 0 && (int) $coverage['plain'] === 0) {
+                $out('');
+                $out('The CDRs NetSapiens returned carry no call ids at all, so the poll cannot help:');
+                $out('  php bin/console.php ns:test --hours=48');
+                $out('That prints the identifiers found on a sample CDR, per domain.');
+            }
+
+            break;
+
         case 'calls:audit':
             /** @var CallRepository $auditCalls */
             $auditCalls = $container->get(CallRepository::class);
             /** @var Database $auditDb */
             $auditDb = $container->get(Database::class);
 
-            $sample = $auditCalls->auditRows($number('limit', 500, 1, 5000));
+            $coverage = $auditCalls->transcriptCoverage($number('limit', 500, 1, 5000));
             $show = $number('show', 3, 0, 20);
+            $count = (int) $coverage['sampled'];
 
-            if ($sample === []) {
+            if ($count === 0) {
                 $fail('No calls stored yet — nothing to audit.');
             }
 
@@ -623,85 +801,32 @@ try {
                 "SELECT COUNT(*) AS n FROM calls WHERE has_transcript = 0 AND transcript_status = 'unavailable'",
             ) ?? [])['n'] ?? 0);
 
-            $withRaw = 0;
-            $withOrig = 0;
-            $withTerm = 0;
-            $withJob = 0;
-            $withPrefilled = 0;
-            $withPlain = 0;
-            $frequency = [];
-            $missing = [];
-            $byDomain = [];
-            $jobKeyNull = 0;
+            $percent = static fn (int $part): string => sprintf('%3d%%', (int) round($part * 100 / $count));
 
-            foreach ($sample as $row) {
-                $raw = json_decode((string) ($row['raw_cdr'] ?? ''), true);
-                $raw = is_array($raw) ? $raw : [];
-
-                if ($raw !== []) {
-                    $withRaw++;
-                }
-
-                foreach (array_keys($raw) as $key) {
-                    $frequency[$key] = ($frequency[$key] ?? 0) + 1;
-                }
-
-                $orig = trim((string) ($raw['call-orig-call-id'] ?? ''));
-                $term = trim((string) ($raw['call-term-call-id'] ?? ''));
-                $job = trim((string) ($raw['call-intelligence-job-id'] ?? ''));
-                $prefilled = trim((string) ($raw['prefilled-transcription-api'] ?? ''));
-                $plain = trim((string) ($raw['call-id'] ?? $raw['callid'] ?? ''));
-
-                $withOrig += $orig !== '' ? 1 : 0;
-                $withTerm += $term !== '' ? 1 : 0;
-                $withJob += $job !== '' ? 1 : 0;
-                $withPrefilled += $prefilled !== '' ? 1 : 0;
-                $withPlain += $plain !== '' ? 1 : 0;
-
-                if (array_key_exists('call-intelligence-job-id', $raw) && $job === '') {
-                    $jobKeyNull++;
-                }
-
-                $domainName = (string) ($row['domain_name'] ?? '');
-                $byDomain[$domainName] ??= ['calls' => 0, 'job' => 0, 'link' => 0, 'ids' => 0, 'none' => 0];
-                $byDomain[$domainName]['calls']++;
-                $byDomain[$domainName]['job'] += $job !== '' ? 1 : 0;
-                $byDomain[$domainName]['link'] += $prefilled !== '' ? 1 : 0;
-                $byDomain[$domainName]['ids'] += ($orig !== '' || $term !== '' || $plain !== '') ? 1 : 0;
-
-                if ($orig === '' && $term === '' && $prefilled === '' && $plain === '') {
-                    $missing[] = ['row' => $row, 'raw' => $raw];
-                    $byDomain[$domainName]['none']++;
-                }
-            }
-
-            $count = count($sample);
-            $percent = static fn (int $part): string => sprintf('%3d%%', $count > 0 ? (int) round($part * 100 / $count) : 0);
-
-            $out('Call audit — ' . $count . ' newest of ' . $total . ' call(s), ' . Time::now());
+            $out('Call audit — ' . $count . ' newest of ' . $total . ' call(s), ' . Time::now() . '  (build ' . $build . ')');
             $out('');
             $out('  what the stored CDRs carry');
-            $out(sprintf('    raw CDR kept              %5d  %s', $withRaw, $percent($withRaw)));
-            $out(sprintf('    call-orig-call-id         %5d  %s', $withOrig, $percent($withOrig)));
-            $out(sprintf('    call-term-call-id         %5d  %s', $withTerm, $percent($withTerm)));
-            $out(sprintf('    call-intelligence-job-id  %5d  %s', $withJob, $percent($withJob)));
-            $out(sprintf('    prefilled-transcription   %5d  %s', $withPrefilled, $percent($withPrefilled)));
-            $out(sprintf('    call-id (single leg)      %5d  %s', $withPlain, $percent($withPlain)));
-            $out(sprintf('    no id of any kind         %5d  %s', count($missing), $percent(count($missing))));
+            $out(sprintf('    raw CDR kept              %5d  %s', $coverage['raw'], $percent($coverage['raw'])));
+            $out(sprintf('    call-orig-call-id         %5d  %s', $coverage['orig'], $percent($coverage['orig'])));
+            $out(sprintf('    call-term-call-id         %5d  %s', $coverage['term'], $percent($coverage['term'])));
+            $out(sprintf('    call-intelligence-job-id  %5d  %s', $coverage['job'], $percent($coverage['job'])));
+            $out(sprintf('    prefilled-transcription   %5d  %s', $coverage['prefilled'], $percent($coverage['prefilled'])));
+            $out(sprintf('    call-id (single leg)      %5d  %s', $coverage['plain'], $percent($coverage['plain'])));
+            $out(sprintf('    no id of any kind         %5d  %s', count($coverage['missing']), $percent(count($coverage['missing']))));
             $out('');
             $out(sprintf('  transcripts marked unavailable across the table: %d', $unavailable));
 
-            if ($jobKeyNull > 0) {
-                $out(sprintf('  call-intelligence-job-id is present but empty on %d of %d CDR(s)', $jobKeyNull, $count));
+            if ($coverage['job_null'] > 0) {
+                $out(sprintf('  call-intelligence-job-id is present but empty on %d of %d CDR(s)', $coverage['job_null'], $count));
             }
 
-            if ($byDomain !== []) {
-                uasort($byDomain, static fn (array $a, array $b): int => $b['calls'] <=> $a['calls']);
+            if ($coverage['by_domain'] !== []) {
+                uasort($coverage['by_domain'], static fn (array $a, array $b): int => $b['calls'] <=> $a['calls']);
                 $out('');
                 $out('  per domain');
                 $out(sprintf('    %-30s %5s  %6s %6s %6s %6s', 'domain', 'calls', 'job id', 'link', 'ids', 'none'));
 
-                foreach ($byDomain as $domainName => $stats) {
+                foreach ($coverage['by_domain'] as $domainName => $stats) {
                     $pct = static fn (int $part): string => sprintf(
                         '%3d%%',
                         $stats['calls'] > 0 ? (int) round($part * 100 / $stats['calls']) : 0,
@@ -719,21 +844,22 @@ try {
                 }
             }
 
-            if ($frequency !== []) {
-                arsort($frequency);
+            if ($coverage['keys'] !== []) {
+                $keys = $coverage['keys'];
+                arsort($keys);
                 $out('');
                 $out('  raw CDR keys (most common first)');
 
-                foreach (array_slice($frequency, 0, 25, true) as $key => $hits) {
+                foreach (array_slice($keys, 0, 25, true) as $key => $hits) {
                     $out(sprintf('    %-34s %5d', $key, $hits));
                 }
             }
 
-            if ($show > 0 && $missing !== []) {
+            if ($show > 0 && $coverage['missing'] !== []) {
                 $out('');
                 $out('  calls with no usable id');
 
-                foreach (array_slice($missing, 0, $show) as $entry) {
+                foreach (array_slice($coverage['missing'], 0, $show) as $entry) {
                     $row = $entry['row'];
                     $raw = $entry['raw'];
 
@@ -751,34 +877,34 @@ try {
                 }
             }
 
-            $missingEmpty = 0;
-            $missingWithRaw = 0;
+            $jobless = [];
 
-            foreach ($missing as $entry) {
+            foreach ($coverage['by_domain'] as $domainName => $stats) {
+                if ($stats['job'] === 0) {
+                    $jobless[$domainName] = $stats['calls'];
+                }
+            }
+
+            $missingCount = count($coverage['missing']);
+            $fixable = $count - $missingCount;
+            $missingEmpty = 0;
+
+            foreach ($coverage['missing'] as $entry) {
                 if ($entry['raw'] === []) {
                     $missingEmpty++;
-                } else {
-                    $missingWithRaw++;
                 }
             }
 
             $out('');
             $out('  what this means');
 
-            $jobless = [];
-
-            foreach ($byDomain as $domainName => $stats) {
-                if ($stats['job'] === 0) {
-                    $jobless[$domainName] = $stats['calls'];
-                }
-            }
-
-            if ($missing === []) {
-                $out('    Every sampled CDR carries an identifier — reprocess picks them up:');
+            if ($fixable > 0) {
+                $out(sprintf('    %d call(s) carry a usable identifier — reprocess repairs those:', $fixable));
                 $out('      php bin/console.php calls:reprocess --limit=100');
             }
 
             if ($jobless !== []) {
+                $out('');
                 $out('    Call Intelligence produced no job id for these calls, so NetSapiens has no');
                 $out('    transcript to fetch at all — nothing in the CDR can be used:');
 
@@ -794,39 +920,12 @@ try {
                 $out('    In NetSapiens, check for each of those domains that Call Intelligence');
                 $out('    (recording transcription) is enabled, and that the calls actually have');
                 $out('    recordings. A domain where it works has a non-null call-intelligence-job-id');
-                $out('    and a prefilled-transcription-api on the CDR — compare with');
-                $out('      php bin/console.php calls:audit --limit=50 --show=0   (after a new call)');
+                $out('    and a prefilled-transcription-api on the CDR.');
             }
 
-            $guessed = [];
-
-            foreach ($byDomain as $domainName => $stats) {
-                if ($stats['job'] > 0 && $stats['link'] === 0) {
-                    $guessed[$domainName] = $stats['calls'];
-                }
-            }
-
-            if ($guessed !== []) {
+            if ($missingEmpty > 0) {
                 $out('');
-                $out('    These domains have job ids but no prefilled-transcription-api, so the lookup');
-                $out('    is built from the CDR fields — verify one by hand:');
-
-                foreach (array_keys($guessed) as $domainName) {
-                    $out('      php bin/console.php transcript:test --call=<id of a ' . $domainName . ' call>');
-                }
-            }
-
-            $empty = 0;
-
-            foreach ($missing as $entry) {
-                if ($entry['raw'] === []) {
-                    $empty++;
-                }
-            }
-
-            if ($empty > 0) {
-                $out('');
-                $out(sprintf('    %d call(s) kept no raw CDR at all: re-ingest with %s', $empty, 'php bin/console.php poll 72'));
+                $out(sprintf('    %d call(s) kept no raw CDR at all: re-ingest with php bin/console.php poll 168', $missingEmpty));
             }
 
             break;
@@ -852,28 +951,8 @@ try {
 
                 // Old rows may still carry our synthetic cdr-<hash> id; the stored
                 // CDR often knows the real ones, so put them back before the retry.
-                if ($before !== null) {
-                    $rawCdr = json_decode((string) ($before['raw_cdr'] ?? '{}'), true);
-                    $rawCdr = is_array($rawCdr) ? $rawCdr : [];
-                    $storedOrig = (string) ($before['orig_call_id'] ?? '');
-
-                    if ($rawCdr !== [] && ($storedOrig === '' || str_starts_with($storedOrig, 'cdr-'))) {
-                        $mapped = CdrMapper::map($rawCdr, (string) ($before['domain_name'] ?? ''));
-
-                        $reference = TranscriptionReference::fromCdr($rawCdr);
-                        $jobId = (string) ($reference->jobId ?? '');
-                        $orig = (string) $mapped['orig_call_id'];
-
-                        if ($orig !== '' && !str_starts_with($orig, 'cdr-')) {
-                            $callRepo->patchIdentifiers(
-                                $id,
-                                $orig,
-                                (string) ($mapped['term_call_id'] ?? ''),
-                                $jobId !== '' ? $jobId : (string) ($mapped['job_id'] ?? ''),
-                            );
-                            $out('  #' . $id . ' repaired the call ids / job id from the stored CDR');
-                        }
-                    }
+                if ($before !== null && dp_repair_identifiers($callRepo, $id, $before)) {
+                    $out('  #' . $id . ' repaired the call ids / job id from the stored CDR');
                 }
 
                 $result = $processor->process($id, true);

@@ -213,6 +213,80 @@ final class CallRepository
 
     /** @param array<string, mixed> $filters */
     /**
+     * Which transcript identifiers the stored CDRs actually carry.
+     *
+     * @return array{
+     *     sampled:int, raw:int, orig:int, term:int, job:int, job_null:int,
+     *     prefilled:int, plain:int, keys:array<string,int>,
+     *     missing:list<array{row:array<string,mixed>,raw:array<string,mixed>}>,
+     *     by_domain:array<string,array{calls:int,job:int,link:int,ids:int,none:int}>
+     * }
+     */
+    public function transcriptCoverage(int $limit = 500): array
+    {
+        $coverage = [
+            'sampled' => 0,
+            'raw' => 0,
+            'orig' => 0,
+            'term' => 0,
+            'job' => 0,
+            'job_null' => 0,
+            'prefilled' => 0,
+            'plain' => 0,
+            'keys' => [],
+            'missing' => [],
+            'by_domain' => [],
+        ];
+
+        foreach ($this->auditRows($limit) as $row) {
+            $raw = json_decode((string) ($row['raw_cdr'] ?? ''), true);
+            $raw = is_array($raw) ? $raw : [];
+
+            $coverage['sampled']++;
+
+            if ($raw !== []) {
+                $coverage['raw']++;
+            }
+
+            foreach (array_keys($raw) as $key) {
+                $coverage['keys'][$key] = ($coverage['keys'][$key] ?? 0) + 1;
+            }
+
+            $orig = trim((string) ($raw['call-orig-call-id'] ?? ''));
+            $term = trim((string) ($raw['call-term-call-id'] ?? ''));
+            $job = trim((string) ($raw['call-intelligence-job-id'] ?? ''));
+            $prefilled = trim((string) ($raw['prefilled-transcription-api'] ?? ''));
+            $plain = trim((string) ($raw['call-id'] ?? $raw['callid'] ?? ''));
+
+            if (array_key_exists('call-intelligence-job-id', $raw) && $job === '') {
+                $coverage['job_null']++;
+            }
+
+            $coverage['orig'] += $orig !== '' ? 1 : 0;
+            $coverage['term'] += $term !== '' ? 1 : 0;
+            $coverage['job'] += $job !== '' ? 1 : 0;
+            $coverage['prefilled'] += $prefilled !== '' ? 1 : 0;
+            $coverage['plain'] += $plain !== '' ? 1 : 0;
+
+            $hasId = $orig !== '' || $term !== '' || $prefilled !== '' || $plain !== '';
+            $domainName = (string) ($row['domain_name'] ?? '');
+
+            $coverage['by_domain'][$domainName] ??= ['calls' => 0, 'job' => 0, 'link' => 0, 'ids' => 0, 'none' => 0];
+            $coverage['by_domain'][$domainName]['calls']++;
+            $coverage['by_domain'][$domainName]['job'] += $job !== '' ? 1 : 0;
+            $coverage['by_domain'][$domainName]['link'] += $prefilled !== '' ? 1 : 0;
+            $coverage['by_domain'][$domainName]['ids'] += ($orig !== '' || $term !== '' || $plain !== '') ? 1 : 0;
+
+            if (!$hasId) {
+                $coverage['missing'][] = ['row' => $row, 'raw' => $raw];
+                $coverage['by_domain'][$domainName]['none']++;
+            }
+        }
+
+        return $coverage;
+    }
+
+    /**
      * Newest calls with everything needed to explain a missing transcript.
      *
      * @return list<array<string, mixed>>
