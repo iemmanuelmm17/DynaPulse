@@ -62,11 +62,20 @@ $base = dirname(__DIR__);
 $build = trim((string) @file_get_contents($base . DIRECTORY_SEPARATOR . 'VERSION'));
 $build = $build !== '' ? $build : 'unknown';
 
+// Keep in sync with private/VERSION: a mismatch means only some of the files
+// were replaced, which is the usual reason "the fix isn't working".
+const DP_CODE_BUILD = '2026.11.16.8';
+
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
 
 $config = $container->get(Config::class);
 Context::$config = $config;
+
+if ($build !== DP_CODE_BUILD) {
+    fwrite(STDERR, '! mixed installation: private/VERSION says "' . $build . '" but this console.php is build '
+        . DP_CODE_BUILD . ' — re-copy private\\src, private\\bin, private\\views and private\\VERSION.' . PHP_EOL);
+}
 
 $argv = $_SERVER['argv'] ?? [];
 $command = $argv[1] ?? 'help';
@@ -360,7 +369,7 @@ try {
 
         case 'version':
         case '--version':
-            $out('DynaPulse build ' . $build);
+            $out('DynaPulse build ' . $build . '   (code ' . DP_CODE_BUILD . ')');
             $out('  php        ' . PHP_VERSION . '  (' . PHP_SAPI . ')');
             $out('  private    ' . $base);
             $out('  database   ' . (string) $config->get('db.database', ''));
