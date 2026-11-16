@@ -212,6 +212,26 @@ final class CallRepository
     }
 
     /** @param array<string, mixed> $filters */
+    /**
+     * Newest calls with everything needed to explain a missing transcript.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function auditRows(int $limit = 500): array
+    {
+        $limit = max(1, min(5000, $limit));
+
+        return $this->db->select(
+            "SELECT c.id, c.call_id, c.orig_call_id, c.term_call_id, c.transcript_job_id,
+                    c.has_transcript, c.transcript_status, c.started_at, c.raw_cdr,
+                    d.domain AS domain_name
+               FROM calls c
+               LEFT JOIN domains d ON d.id = c.domain_id
+              ORDER BY c.id DESC
+              LIMIT " . $limit,
+        );
+    }
+
     /** Repair the NetSapiens identifiers of a row ingested without them. */
     public function patchIdentifiers(int $id, string $origCallId, string $termCallId = '', string $jobId = ''): void
     {

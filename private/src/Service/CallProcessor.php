@@ -99,6 +99,20 @@ final class CallProcessor
                 ? $reference->termCallId
                 : trim((string) ($call['term_call_id'] ?? ''));
 
+            // Some NetSapiens builds return only the leg id ("call-id") and no
+            // orig/term split; that id is still worth one request.
+            if (!self::usableCallId($origCallId) && !self::usableCallId($termCallId)) {
+                $plainId = trim((string) ($rawCdr['call-id'] ?? $rawCdr['callid'] ?? ''));
+
+                if (self::usableCallId($plainId)) {
+                    $origCallId = $plainId;
+                    Logger::info('processor.transcription_plain_call_id', [
+                        'call_id' => $callId,
+                        'call_id_used' => $plainId,
+                    ]);
+                }
+            }
+
             if ($effectiveJob === '' || (!self::usableCallId($origCallId) && !self::usableCallId($termCallId))) {
                 // Nothing to ask for: the CDR had no NetSapiens call ids, so the
                 // row can only be identified by our synthetic cdr-<hash> id.

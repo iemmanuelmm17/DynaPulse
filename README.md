@@ -274,6 +274,8 @@ came from, then fetches that call's payload and shows what was parsed; `--cdr` d
 and every raw key),
 `console.php calls:reprocess` (retries calls that have a job id but no stored transcript, and repairs the
 call ids / job id of rows ingested without them),
+`console.php calls:audit [--limit] [--show]` (which identifiers the stored CDRs actually carry, plus full
+payloads of the calls that have none),
 `console.php domains:sync` (import the domains the API key can see; used by *Administration → Domains →
 Import*),
 `console.php test-mail --to=you@example.com`, `console.php migrate`, `console.php help`.
@@ -357,7 +359,8 @@ php bin\console.php process --limit=10 --budget=45
 | Alerts show “Email not configured” | `MAIL_*` values missing in `.env`; the portal logs `alert.blocked`. |
 | Calls appear but no transcripts | Run `php bin\console.php transcript:test --call=ID`. It prints a *resolved lookup* block — domain, job id, `YYYYMM` and both call ids, each tagged with where the value came from (*the CDR's prefilled link*, *the CDR (`call-orig-call-id`)*, *the row*) — then the exact URL, the HTTP status and the parsed summary/segments. `--apply` saves the result and re-runs matching. `php bin\console.php calls:reprocess` retries every call that has a job id but no transcript (useful after a fix, or when processing gave up after 8 attempts) and repairs rows that were stored without call ids. |
 | `403 Bad request. Invalid domain or callids.` from `/transcriptions` | NetSapiens rejects the domain unless it is spelled exactly as configured (`1180.DynaCloud`, not `1180.dynacloud`) and both call ids are present. The portal replies on three levels: it replays the CDR's `prefilled-transcription-api` verbatim, it adopts NetSapiens' spelling on ingest, and when a request still comes back 403 it looks the domain up in `/domains`, retries once with the exact spelling and re-spells the row. `transcript:test --call=ID` prints every identifier with the place it came from. |
-| Transcript marked “unavailable” with no HTTP call made | The stored CDR carried neither call ids nor a `prefilled-transcription-api`. Call Intelligence was off for that call; reprocessing cannot invent the ids, so the call stays without a transcript. |
+| Transcript marked “unavailable” with no HTTP call made | The stored CDR carried neither call ids nor a `prefilled-transcription-api`. Run `php bin\console.php calls:audit`: it reports which identifiers the stored CDRs actually carry, the most common raw keys, and a sample payload — so you can tell “no raw CDR was kept” (re-ingest with `poll 72`) from “the CDR really has no ids” (the CDR shape NetSapiens returns for that key). |
+| Many calls say “the CDR carried no NetSapiens call ids” | `php bin\console.php calls:audit --show=3` prints the coverage per key plus full payloads of the offenders. If a fresh `poll 2` still yields CDRs without `call-orig-call-id`/`prefilled-transcription-api`, the API key is reading an older CDR shape — the audit output is what to send on. |
 | `transcript:test` says HTTP 404 | NetSapiens has no Call Intelligence row for that job/date/call id yet — the job may still be running, or the CDR carried no `call-intelligence-job-id` (Call Intelligence was off when the call happened). |
 | Transcript stored but alerts never fired | Keywords are matched against summary, topics and transcript text; check the keyword's *fields* and its severity against `alert_min_severity`. |
 | Recording button 404s | No recording on file in NetSapiens (recording disabled for that user), or the media URL expired before download. Calls whose stored CDR had no call ids are never looked up (their `cdr-…` id is not a NetSapiens id) and report no recording instead of a 404. |

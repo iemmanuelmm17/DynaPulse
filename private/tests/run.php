@@ -591,6 +591,67 @@ test('A 403 from a mis-spelled domain is retried with the NetSapiens spelling', 
     }
 });
 
+test('A CDR that only carries call-id is queried with that id', function () use ($container, $fakeNs): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domainRepo->ensure('plainid.test', 'Plain Id', 'UTC');
+
+    $cdr = [
+        'id' => 'beefbeef00000000000000000000000000000417',
+        'call-id' => '20261116153414064248-cac18a7984653a998c54034ec629e12c',
+        'call-start-datetime' => '2026-11-16T15:34:14+00:00',
+        'call-intelligence-job-id' => 555000111,
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('plainid.test', $cdr, true);
+
+    $queries = array_values(array_filter(
+        $fakeNs->transcriptionQueries,
+        static fn (array $q): bool => $q['job'] === '555000111',
+    ));
+
+    assertSame(1, count($queries), 'the plain call-id was used for exactly one request');
+    assertSame('20261116153414064248-cac18a7984653a998c54034ec629e12c', $queries[0]['orig'], 'call-id became orig_callid');
+    assertSame('', $queries[0]['term']);
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $row = $calls->find((int) $result['call_id']);
+    assertTrue((string) $row['transcript_status'] !== 'unavailable', 'a 404 leaves it pending, not unavailable');
+});
+
+test('calls:audit sees which identifiers the stored CDRs carry', function () use ($container): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domainRepo->ensure('audit.test', 'Audit', 'UTC');
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $ingest->ingestCdr('audit.test', [
+        'id' => 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaud1',
+        'call-start-datetime' => '2026-11-17T09:00:00+00:00',
+        'call-intelligence-job-id' => 777000111,
+        'call-orig-call-id' => '555111@10.0.0.1',
+    ], false);
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $rows = $calls->auditRows(500);
+    assertTrue($rows !== [], 'rows come back');
+
+    $found = array_values(array_filter(
+        $rows,
+        static fn (array $row): bool => (string) ($row['transcript_job_id'] ?? '') === '777000111',
+    ));
+    assertSame(1, count($found), 'the fresh call is in the sample');
+    assertSame('audit.test', (string) $found[0]['domain_name'], 'the domain is joined in');
+
+    $raw = json_decode((string) $found[0]['raw_cdr'], true);
+    assertSame('555111@10.0.0.1', (string) ($raw['call-orig-call-id'] ?? ''), 'the raw CDR is kept for the audit');
+});
+
 test('A CDR without call ids is not sent to the API', function () use ($container, $fakeNs): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);

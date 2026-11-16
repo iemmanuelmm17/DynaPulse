@@ -10,6 +10,7 @@ declare(strict_types=1);
  *   php private/bin/console.php ns:test [--domain=acme.com] [--hours=24]
  *   php private/bin/console.php transcript:test --call=123 [--apply] [--raw]
  *   php private/bin/console.php calls:reprocess [--limit=50]
+ *   php private/bin/console.php calls:audit [--limit=500] [--show=3]
  *   php private/bin/console.php domains:sync
  *   php private/bin/console.php poll [hours]
  *   php private/bin/console.php process [--limit=25] [--budget=50]
@@ -127,6 +128,7 @@ try {
             $out('  transcript:test --call=ID     fetch one call\'s Call Intelligence payload (--apply saves it)');
             $out('                                add --cdr to print the stored CDR identity, --raw for the payload');
             $out('  calls:reprocess [--limit]     retry calls that have a job id but no stored transcript');
+            $out('  calls:audit [--limit] [--show] which identifiers the stored CDRs actually carry');
             $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
             $out('  notify [--limit]              send queued alert emails');
@@ -601,6 +603,150 @@ try {
                 $out('  matches             ' . (int) ($fresh['match_count'] ?? 0));
                 $out('  last_error          ' . ((string) ($fresh['last_error'] ?? '') !== '' ? (string) $fresh['last_error'] : '—'));
             }
+            break;
+
+        case 'calls:audit':
+            /** @var CallRepository $auditCalls */
+            $auditCalls = $container->get(CallRepository::class);
+            /** @var Database $auditDb */
+            $auditDb = $container->get(Database::class);
+
+            $sample = $auditCalls->auditRows($number('limit', 500, 1, 5000));
+            $show = $number('show', 3, 0, 20);
+
+            if ($sample === []) {
+                $fail('No calls stored yet — nothing to audit.');
+            }
+
+            $total = (int) (($auditDb->first('SELECT COUNT(*) AS n FROM calls') ?? [])['n'] ?? 0);
+            $unavailable = (int) (($auditDb->first(
+                "SELECT COUNT(*) AS n FROM calls WHERE has_transcript = 0 AND transcript_status = 'unavailable'",
+            ) ?? [])['n'] ?? 0);
+
+            $withRaw = 0;
+            $withOrig = 0;
+            $withTerm = 0;
+            $withJob = 0;
+            $withPrefilled = 0;
+            $withPlain = 0;
+            $frequency = [];
+            $missing = [];
+
+            foreach ($sample as $row) {
+                $raw = json_decode((string) ($row['raw_cdr'] ?? ''), true);
+                $raw = is_array($raw) ? $raw : [];
+
+                if ($raw !== []) {
+                    $withRaw++;
+                }
+
+                foreach (array_keys($raw) as $key) {
+                    $frequency[$key] = ($frequency[$key] ?? 0) + 1;
+                }
+
+                $orig = trim((string) ($raw['call-orig-call-id'] ?? ''));
+                $term = trim((string) ($raw['call-term-call-id'] ?? ''));
+                $job = trim((string) ($raw['call-intelligence-job-id'] ?? ''));
+                $prefilled = trim((string) ($raw['prefilled-transcription-api'] ?? ''));
+                $plain = trim((string) ($raw['call-id'] ?? $raw['callid'] ?? ''));
+
+                $withOrig += $orig !== '' ? 1 : 0;
+                $withTerm += $term !== '' ? 1 : 0;
+                $withJob += $job !== '' ? 1 : 0;
+                $withPrefilled += $prefilled !== '' ? 1 : 0;
+                $withPlain += $plain !== '' ? 1 : 0;
+
+                if ($orig === '' && $term === '' && $prefilled === '' && $plain === '') {
+                    $missing[] = ['row' => $row, 'raw' => $raw];
+                }
+            }
+
+            $count = count($sample);
+            $percent = static fn (int $part): string => sprintf('%3d%%', $count > 0 ? (int) round($part * 100 / $count) : 0);
+
+            $out('Call audit — ' . $count . ' newest of ' . $total . ' call(s), ' . Time::now());
+            $out('');
+            $out('  what the stored CDRs carry');
+            $out(sprintf('    raw CDR kept              %5d  %s', $withRaw, $percent($withRaw)));
+            $out(sprintf('    call-orig-call-id         %5d  %s', $withOrig, $percent($withOrig)));
+            $out(sprintf('    call-term-call-id         %5d  %s', $withTerm, $percent($withTerm)));
+            $out(sprintf('    call-intelligence-job-id  %5d  %s', $withJob, $percent($withJob)));
+            $out(sprintf('    prefilled-transcription   %5d  %s', $withPrefilled, $percent($withPrefilled)));
+            $out(sprintf('    call-id (single leg)      %5d  %s', $withPlain, $percent($withPlain)));
+            $out(sprintf('    no id of any kind         %5d  %s', count($missing), $percent(count($missing))));
+            $out('');
+            $out(sprintf('  transcripts marked unavailable across the table: %d', $unavailable));
+
+            if ($frequency !== []) {
+                arsort($frequency);
+                $out('');
+                $out('  raw CDR keys (most common first)');
+
+                foreach (array_slice($frequency, 0, 25, true) as $key => $hits) {
+                    $out(sprintf('    %-34s %5d', $key, $hits));
+                }
+            }
+
+            if ($show > 0 && $missing !== []) {
+                $out('');
+                $out('  calls with no usable id');
+
+                foreach (array_slice($missing, 0, $show) as $entry) {
+                    $row = $entry['row'];
+                    $raw = $entry['raw'];
+
+                    $out('');
+                    $out(sprintf(
+                        '    #%-6s %-24s %s',
+                        (string) $row['id'],
+                        (string) ($row['domain_name'] ?? ''),
+                        (string) ($row['started_at'] ?? ''),
+                    ));
+                    $out('      job id   ' . (trim((string) ($row['transcript_job_id'] ?? '')) !== '' ? (string) $row['transcript_job_id'] : '(none)'));
+                    $out('      row id   ' . (string) ($row['call_id'] ?? '') . '   orig ' . ((string) ($row['orig_call_id'] ?? '') !== '' ? (string) $row['orig_call_id'] : '(empty)'));
+                    $out('      keys     ' . ($raw !== [] ? implode(', ', array_slice(array_keys($raw), 0, 30)) : '(raw CDR is empty)'));
+                    $out('      payload  ' . ($raw !== [] ? Str::limit((string) json_encode($raw, JSON_UNESCAPED_SLASHES), 320) : '{}'));
+                }
+            }
+
+            $missingEmpty = 0;
+            $missingWithRaw = 0;
+
+            foreach ($missing as $entry) {
+                if ($entry['raw'] === []) {
+                    $missingEmpty++;
+                } else {
+                    $missingWithRaw++;
+                }
+            }
+
+            $out('');
+            $out('  what this means');
+
+            $fixable = $count - count($missing);
+
+            if ($fixable > 0) {
+                $out(sprintf('    %d call(s) carry a usable identifier — reprocess repairs those:', $fixable));
+                $out('      php bin/console.php calls:reprocess --limit=100');
+            }
+
+            if ($missingEmpty > 0) {
+                $out(sprintf('    %d call(s) kept no raw CDR at all: nothing can be recovered from them.', $missingEmpty));
+                $out('    Re-ingest the window to store the payloads: php bin/console.php poll 72');
+            }
+
+            if ($missingWithRaw > 0) {
+                $out(sprintf('    %d call(s) kept their CDR, but it carries no call id NetSapiens accepts', $missingWithRaw));
+                $out('    (only id / call-intelligence-job-id). Check a brand new call first:');
+                $out('      php bin/console.php poll 2   then   php bin/console.php calls:audit --show=1');
+                $out('    If the fresh CDR also lacks call-orig-call-id / prefilled-transcription-api,');
+                $out('    the API key is getting an older CDR shape — send that payload to adapt to it.');
+            }
+
+            if ($missing === []) {
+                break;
+            }
+
             break;
 
         case 'calls:reprocess':
