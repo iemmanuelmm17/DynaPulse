@@ -19,6 +19,7 @@ declare(strict_types=1);
  *   php private/bin/console.php prune
  *   php private/bin/console.php repair [--hours=168] [--limit=200]
  *   php private/bin/console.php version
+ *   php private/bin/console.php update [--branch=arena/c8955fd9-dynapulse]
  *   php private/bin/console.php status
  *   php private/bin/console.php subscription:create [--scope=domain]
  *   php private/bin/console.php test-mail --to=you@example.com
@@ -120,6 +121,43 @@ function dp_repair_identifiers(CallRepository $calls, int $id, array $row): bool
     return true;
 }
 
+
+/**
+ * Recursive copy used by `update`; returns the number of files written.
+ */
+function dp_copy_tree(string $from, string $to): int
+{
+    if (!is_dir($to) && !@mkdir($to, 0775, true) && !is_dir($to)) {
+        throw new RuntimeException('Cannot create ' . $to);
+    }
+
+    $copied = 0;
+    $items = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($from, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST,
+    );
+
+    foreach ($items as $item) {
+        $target = $to . DIRECTORY_SEPARATOR . $items->getSubPathname();
+
+        if ($item->isDir()) {
+            if (!is_dir($target) && !@mkdir($target, 0775, true) && !is_dir($target)) {
+                throw new RuntimeException('Cannot create ' . $target);
+            }
+
+            continue;
+        }
+
+        if (!@copy($item->getPathname(), $target)) {
+            throw new RuntimeException('Cannot write ' . $target);
+        }
+
+        $copied++;
+    }
+
+    return $copied;
+}
+
 $option = static fn (string $name, ?string $default = null): ?string => $options[$name] ?? $default;
 $number = static function (string $name, int $default, int $min, int $max) use ($option): int {
     $value = $option($name);
@@ -161,6 +199,164 @@ $writeEnv = static function (string $file, string $key, string $value): bool {
 
 try {
     switch ($command) {
+        case 'update':
+            $branch = (string) ($option('branch') ?? $config->get('app.update_branch', 'main'));
+            $url = (string) ($option('url') ?? ('https://codeload.github.com/iemmanuelmm17/DynaPulse/zip/refs/heads/' . $branch));
+
+            $tmpRoot = (string) $config->get('paths.tmp', $base . DIRECTORY_SEPARATOR . 'storage' . DIRECTORY_SEPARATOR . 'tmp');
+            $stamp = date('Ymd-His');
+            $zipPath = $tmpRoot . DIRECTORY_SEPARATOR . 'update-' . $stamp . '.zip';
+            $extractDir = $tmpRoot . DIRECTORY_SEPARATOR . 'update-' . $stamp;
+            $localZip = $options['zip'] ?? null;
+            $downloaded = false;
+
+            $out('DynaPulse update — build ' . $build);
+            $out('  from   ' . ($localZip !== null ? $localZip : $url));
+            $out('  into   ' . $base);
+            $out('');
+
+            if (!is_dir($tmpRoot) && !@mkdir($tmpRoot, 0775, true) && !is_dir($tmpRoot)) {
+                $fail('Cannot create ' . $tmpRoot);
+            }
+
+            if ($localZip !== null) {
+                $out('[1/4] local archive');
+
+                if (!is_file($localZip)) {
+                    $fail('No such file: ' . $localZip);
+                }
+
+                $zipPath = $localZip;
+                $out('      ' . number_format((int) @filesize($zipPath) / 1024, 0) . ' KB');
+            } else {
+                $out('[1/4] download');
+                $handle = curl_init($url);
+
+                $curlOptions = [
+                    CURLOPT_RETURNTRANSFER => true,
+                    CURLOPT_FOLLOWLOCATION => true,
+                    CURLOPT_TIMEOUT => 180,
+                    CURLOPT_USERAGENT => 'DynaPulse-update',
+                ];
+
+                // XAMPP's php.ini usually has no CA bundle configured, which makes
+                // curl fail with "unable to get local issuer certificate".
+                $caFile = (string) (ini_get('curl.cainfo') ?: ini_get('openssl.cafile'));
+                $candidates = array_filter([
+                    $caFile,
+                    dirname(PHP_BINARY) . '/extras/ssl/cacert.pem',
+                    dirname(PHP_BINARY) . '/cacert.pem',
+                    'C:/xampp/php/extras/ssl/cacert.pem',
+                    'C:/xampp/apache/bin/curl-ca-bundle.crt',
+                    'C:/ProgramData/Composer/cacert.pem',
+                ]);
+
+                foreach ($candidates as $candidate) {
+                    if (is_string($candidate) && is_file($candidate)) {
+                        $curlOptions[CURLOPT_CAINFO] = $candidate;
+                        $out('      CA bundle ' . $candidate);
+
+                        break;
+                    }
+                }
+
+                curl_setopt_array($handle, $curlOptions);
+                $body = curl_exec($handle);
+                $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+                $error = curl_error($handle);
+
+                if (!is_string($body) || $body === '') {
+                    $out('      FAILED — ' . ($error !== '' ? $error : 'empty response'));
+
+                    if (stripos((string) $error, 'certificate') !== false) {
+                        $out('');
+                        $out('      PHP has no CA bundle for HTTPS. Either point php.ini at one');
+                        $out('      (curl.cainfo = C:\xampp\php\extras\ssl\cacert.pem), or download the zip');
+                        $out('      in the browser / PowerShell and pass it in:');
+                        $out('        php bin\console.php update --zip=%TEMP%\dp.zip');
+                    }
+
+                    break;
+                }
+
+                if ($status !== 200) {
+                    $fail('Download failed: HTTP ' . $status . ' — check the branch name (' . $branch . ').');
+                }
+
+                file_put_contents($zipPath, $body);
+                $downloaded = true;
+                $out('      ' . number_format(strlen($body) / 1024, 0) . ' KB');
+            }
+
+            $out('[2/4] unpack');
+            $zip = new ZipArchive();
+
+            if ($zip->open($zipPath) !== true) {
+                $fail('The download is not a readable zip file.');
+            }
+
+            $zip->extractTo($extractDir);
+            $zip->close();
+
+            $roots = glob($extractDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR) ?: [];
+            $root = $roots[0] ?? '';
+
+            if ($root === '' || !is_file($root . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . 'bin' . DIRECTORY_SEPARATOR . 'console.php')) {
+                $fail('The archive does not contain private/bin/console.php.');
+            }
+
+            $out('      ' . basename($root));
+
+            $out('[3/4] replace src, bin, views, tests, migrations, bootstrap files');
+            $trees = ['src', 'bin', 'views', 'tests', 'migrations'];
+            $files = ['VERSION', 'bootstrap.php', 'autoload.php', 'routes.php'];
+            $written = 0;
+
+            foreach ($trees as $tree) {
+                $from = $root . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . $tree;
+
+                if (!is_dir($from)) {
+                    continue;
+                }
+
+                $written += dp_copy_tree($from, $base . DIRECTORY_SEPARATOR . $tree);
+                $out('      ' . $tree);
+            }
+
+            foreach ($files as $file) {
+                $from = $root . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_SEPARATOR . $file;
+
+                if (is_file($from) && @copy($from, $base . DIRECTORY_SEPARATOR . $file)) {
+                    $out('      ' . $file);
+                }
+            }
+
+            $out('      ' . $written . ' file(s) written — .env and storage/ untouched');
+
+            $publicPath = (string) $config->get('paths.public', '');
+
+            if ($publicPath !== '' && is_dir($publicPath) && is_dir($root . DIRECTORY_SEPARATOR . 'public')) {
+                $publicWritten = dp_copy_tree($root . DIRECTORY_SEPARATOR . 'public', $publicPath);
+                $out('      public/ (' . $publicWritten . ' file(s) into ' . $publicPath . ')');
+            }
+
+            $out('[4/4] migrate');
+            /** @var Migrator $updater */
+            $updater = $container->get(Migrator::class);
+            $updater->run();
+            $out('      database up to date');
+
+            $newBuild = trim((string) @file_get_contents($base . DIRECTORY_SEPARATOR . 'VERSION'));
+            $out('');
+            $out('Updated: ' . $build . ' → ' . ($newBuild !== '' ? $newBuild : '(unknown)'));
+            $out('Run it again any time; .env and storage are never touched.');
+
+            if ($downloaded) {
+                @unlink($zipPath);
+            }
+
+            break;
+
         case 'version':
         case '--version':
             $out('DynaPulse build ' . $build);
@@ -204,6 +400,7 @@ try {
             $out('  repair [--hours] [--limit]    poll, audit, retry the transcripts, drain the queue');
             $out('  status                        print counters and the last poll outcome');
             $out('  version                       print this build and what it supports');
+            $out('  update [--branch=B] [--url=U] download this branch and replace the code in place');
             $out('  subscription:create [--scope] create the NetSapiens cdr event subscription');
             $out('  test-mail --to=EMAIL          send an SMTP test through the Outlook mailbox');
             break;

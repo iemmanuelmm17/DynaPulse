@@ -278,6 +278,26 @@ Check them with `schtasks /Query /TN "DynaPulse process" /V /FO LIST` and run on
 `schtasks /Run /TN "DynaPulse process"`. Without these, calls stay at **status pending · attempt 0**
 forever: the web UI never processes anything by itself.
 
+### Updating an existing install
+
+```bat
+php bin\console.php update --branch=main
+```
+
+It downloads the branch zip, unpacks it, replaces `src`, `bin`, `views`, `tests`, `migrations`,
+`bootstrap.php`, `autoload.php`, `routes.php`, `VERSION` and (when `public/` is found) the public files,
+then runs the migrations. `.env` and `storage/` are never touched, so the update is repeatable.
+
+If the box has no CA bundle for PHP's curl (`unable to get local issuer certificate`), download the zip
+in the browser or PowerShell and hand it over instead:
+
+```bat
+php bin\console.php update --zip=%TEMP%\dp.zip
+```
+
+`php bin\console.php version` prints the build that is actually on disk — compare it with the release you
+just copied. `public/dp-check.php` shows the same build in the browser.
+
 Useful diagnostics: `console.php status` (counters plus per-domain last poll / last error),
 `console.php ns:test` (checks the API key, the domain list, a real CDR query with `raw=yes` and the
 transcript identifiers found on the sample CDR),
