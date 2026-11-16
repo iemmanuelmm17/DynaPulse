@@ -92,6 +92,19 @@ $add(
 );
 
 if ($privatePath !== null) {
+    // Which build is on disk? This is the quickest "did the copy actually land?".
+    $versionFile = $privatePath . DIRECTORY_SEPARATOR . 'VERSION';
+    $build = is_file($versionFile) ? trim((string) @file_get_contents($versionFile)) : '';
+    $hasRawCdrs = is_file($privatePath . DIRECTORY_SEPARATOR . 'src' . DIRECTORY_SEPARATOR . 'NetSapiens'
+        . DIRECTORY_SEPARATOR . 'TranscriptionReference.php');
+
+    $add(
+        'Build',
+        $build !== '' && $hasRawCdrs,
+        ($build !== '' ? 'DynaPulse ' . $build : 'VERSION file missing — an older copy is installed')
+            . ($hasRawCdrs ? ' · CDR identifiers (raw=yes) supported' : ' · predates the raw=yes CDR fix — update private\\src, private\\bin, private\\views, private\\VERSION'),
+    );
+
     $envFile = $privatePath . DIRECTORY_SEPARATOR . '.env';
     $envExists = is_file($envFile) && is_readable($envFile);
     $add('.env file', $envExists, $envExists ? $envFile : 'missing — copy .env.example to ' . $envFile);
