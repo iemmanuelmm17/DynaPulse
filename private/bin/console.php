@@ -51,6 +51,7 @@ use DynaPulse\Support\Config;
 use DynaPulse\Support\Logger;
 use DynaPulse\Support\Str;
 use DynaPulse\Support\Time;
+use DynaPulse\Support\Zip;
 
 if (PHP_SAPI !== 'cli') {
     http_response_code(404);
@@ -289,14 +290,14 @@ try {
             }
 
             $out('[2/4] unpack');
-            $zip = new ZipArchive();
 
-            if ($zip->open($zipPath) !== true) {
-                $fail('The download is not a readable zip file.');
+            try {
+                $unpacked = Zip::extract($zipPath, $extractDir);
+            } catch (Throwable $e) {
+                $fail('Cannot unpack ' . $zipPath . ': ' . $e->getMessage());
             }
 
-            $zip->extractTo($extractDir);
-            $zip->close();
+            $out('      ' . $unpacked . ' file(s)');
 
             $roots = glob($extractDir . DIRECTORY_SEPARATOR . '*', GLOB_ONLYDIR) ?: [];
             $root = $roots[0] ?? '';

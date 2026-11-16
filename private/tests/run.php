@@ -40,6 +40,7 @@ use DynaPulse\Support\Env;
 use DynaPulse\Support\Logger;
 use DynaPulse\Support\Str;
 use DynaPulse\Support\Time;
+use DynaPulse\Support\Zip;
 use DynaPulse\Tests\Support\FakeNs;
 
 require_once dirname(__DIR__) . DIRECTORY_SEPARATOR . 'autoload.php';
@@ -525,6 +526,44 @@ test('prefilled-transcription-api wins over the stored ids (and fixes the domain
     assertTrue($row !== null, 'call stored');
     assertSame(1, (int) $row['has_transcript'], 'transcript stored from the prefilled lookup');
     assertTrue(in_array('voicemail', (array) $row['transcript_topics'], true), 'topics stored');
+});
+
+test('Zip extracts without ext-zip', function () use ($root): void {
+    $archive = $root . '/storage/tmp/zip-test.zip';
+    $work = $root . '/storage/tmp/zip-test-dir';
+    @unlink($archive);
+
+    if (is_dir($work)) {
+        foreach (new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($work, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST,
+        ) as $item) {
+            $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
+        }
+
+        @rmdir($work);
+    }
+
+    @mkdir($work . '/nested', 0775, true);
+    file_put_contents($work . '/top.txt', 'top level');
+    file_put_contents($work . '/nested/deep.txt', str_repeat('deep ', 200));
+
+    $zip = new ZipArchive();
+    assertTrue($zip->open($archive, ZipArchive::CREATE | ZipArchive::OVERWRITE) === true, 'create zip');
+
+    foreach (['top.txt', 'nested/deep.txt'] as $name) {
+        $zip->addFile($work . '/' . $name, 'DynaPulse-branch/' . $name);
+    }
+
+    $zip->close();
+
+    $target = $root . '/storage/tmp/zip-out';
+    @unlink($target . '/DynaPulse-branch/top.txt');
+    $written = Zip::extractManually($archive, $target);
+
+    assertSame(2, $written, 'both entries written by the manual reader');
+    assertSame('top level', (string) file_get_contents($target . '/DynaPulse-branch/top.txt'));
+    assertSame(str_repeat('deep ', 200), (string) file_get_contents($target . '/DynaPulse-branch/nested/deep.txt'));
 });
 
 test('A raw=yes payload nested under cdr is flattened', function (): void {

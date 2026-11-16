@@ -288,6 +288,10 @@ It downloads the branch zip, unpacks it, replaces `src`, `bin`, `views`, `tests`
 `bootstrap.php`, `autoload.php`, `routes.php`, `VERSION` and (when `public/` is found) the public files,
 then runs the migrations. `.env` and `storage/` are never touched, so the update is repeatable.
 
+Unpacking needs no particular extension: ext-zip is used when present, otherwise PharData, otherwise a
+built-in reader that only needs zlib — a stock XAMPP where `;extension=zip` is still commented out updates
+fine.
+
 If the box has no CA bundle for PHP's curl (`unable to get local issuer certificate`), download the zip
 in the browser or PowerShell and hand it over instead:
 
