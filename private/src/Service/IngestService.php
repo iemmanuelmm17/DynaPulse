@@ -172,11 +172,16 @@ final class IngestService
     /**
      * @return array{polled:int, errors:list<string>, calls:int, domains:int}
      */
-    public function pollAll(?int $hours = null): array
+    public function pollAll(?int $hours = null, ?string $only = null): array
     {
         $summary = ['polled' => 0, 'errors' => [], 'calls' => 0, 'domains' => 0];
+        $only = $only !== null ? trim($only) : null;
 
         foreach ($this->domains->pollable() as $domain) {
+            if ($only !== null && $only !== '' && strcasecmp((string) $domain['domain'], $only) !== 0) {
+                continue;
+            }
+
             $summary['domains']++;
 
             try {

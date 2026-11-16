@@ -14,7 +14,7 @@ declare(strict_types=1);
  *   php private/bin/console.php calls:find --job=78920299
  *   php private/bin/console.php calls:dupes [--fix]
  *   php private/bin/console.php domains:sync
- *   php private/bin/console.php poll [hours]
+ *   php private/bin/console.php poll [hours] [--domain=1180.DynaCloud]
  *   php private/bin/console.php process [--limit=25] [--budget=50] [--call=ID]
  *   php private/bin/console.php notify [--limit=20]
  *   php private/bin/console.php reports:run
@@ -66,7 +66,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.11';
+const DP_CODE_BUILD = '2026.11.16.12';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -415,7 +415,7 @@ try {
             $out('');
             $out('  migrate                       apply pending database migrations');
             $out('  key:generate [--force]        write a random APP_KEY into .env');
-            $out('  poll [hours]                  pull recent CDRs for every pollable domain');
+            $out('  poll [hours] [--domain=NAME]  pull recent CDRs (all pollable domains, or just one)');
             $out('  ns:test [--domain] [--hours]  check NetSapiens credentials and CDR access');
             $out('  transcript:test --call=ID     fetch one call\'s Call Intelligence payload (--apply saves it)');
             $out('                                add --cdr to print the stored CDR identity, --raw for the payload');
@@ -475,7 +475,7 @@ try {
             /** @var IngestService $ingest */
             $ingest = $container->get(IngestService::class);
             $hours = isset($arguments[0]) && is_numeric($arguments[0]) ? max(1, (int) $arguments[0]) : null;
-            $results = $ingest->pollAll($hours);
+            $results = $ingest->pollAll($hours, $option('domain'));
 
             $out(sprintf(
                 'Polled %d of %d domain(s)%s: %d CDR row(s) seen, %d error(s).',
