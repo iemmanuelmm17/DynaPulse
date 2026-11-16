@@ -35,6 +35,9 @@ final class CallProcessor
     ) {
     }
 
+    /** @var array<string, string>|null lower-cased domain => NetSapiens' exact spelling */
+    private ?array $domainIndex = null;
+
     /** @return string complete|retry|failed|skipped|missing */
     public function process(int $callId, bool $force = false): string
     {
@@ -79,6 +82,14 @@ final class CallProcessor
         $nsDomain = self::nsDomain($domain, $rawCdr);
         $reference = TranscriptionReference::fromCdr($rawCdr);
 
+        // Keep the row spelled the way NetSapiens spells it, so the whole UI and
+        // every later request stop showing the lower-cased form.
+        $storedDomain = (string) ($domain['domain'] ?? '');
+        if ($storedDomain !== '' && $nsDomain !== $storedDomain && strcasecmp($nsDomain, $storedDomain) === 0) {
+            $this->domains->adoptDomainName((int) $domain['id'], $nsDomain);
+            $domain['domain'] = $nsDomain;
+        }
+
         if (!$hasTranscript && ($jobId !== '' || $reference !== null)) {
             $effectiveJob = $reference !== null && $reference->jobId !== '' ? $reference->jobId : $jobId;
             $origCallId = $reference !== null && $reference->origCallId !== ''
@@ -96,7 +107,13 @@ final class CallProcessor
                 Logger::warning('processor.transcription_unidentifiable', ['call_id' => $callId]);
             } else {
                 try {
-                    $startedAt = isset($call['started_at']) ? (string) $call['started_at'] : null;
+                    $startedAt = trim((string) ($call['started_at'] ?? ''));
+
+                    if ($startedAt === '') {
+                        $startedAt = trim((string) ($rawCdr['call-start-datetime'] ?? ''));
+                    }
+
+                    $startedAt = $startedAt !== '' ? $startedAt : null;
                     $month = $reference !== null && $reference->month !== ''
                         ? $reference->month
                         : Time::yearMonth($startedAt, $timezone);
@@ -108,6 +125,7 @@ final class CallProcessor
                         Time::yearMonth($startedAt, 'UTC'),
                         $origCallId,
                         $termCallId,
+                        (int) $domain['id'],
                     );
 
                     $transcription = Transcription::fromApi($payload);
@@ -235,6 +253,44 @@ final class CallProcessor
         string $utcMonth,
         string $origCallId,
         string $termCallId,
+        int $domainRowId = 0,
+    ): array {
+        try {
+            return $this->fetchTranscriptionOnce($domainName, $jobId, $month, $utcMonth, $origCallId, $termCallId);
+        } catch (NsException $e) {
+            if (!self::isDomainRejection($e)) {
+                throw $e;
+            }
+
+            // "Bad request. Invalid domain or callids." also fires when the domain
+            // is spelled differently from the one NetSapiens knows.
+            $canonical = $this->canonicalDomain($domainName);
+
+            if ($canonical === null || $canonical === $domainName) {
+                throw $e;
+            }
+
+            if ($domainRowId > 0) {
+                $this->domains->adoptDomainName($domainRowId, $canonical);
+            }
+
+            Logger::info('processor.domain_respelled', [
+                'stored' => $domainName,
+                'netsapiens' => $canonical,
+            ]);
+
+            return $this->fetchTranscriptionOnce($canonical, $jobId, $month, $utcMonth, $origCallId, $termCallId);
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function fetchTranscriptionOnce(
+        string $domainName,
+        string $jobId,
+        string $month,
+        string $utcMonth,
+        string $origCallId,
+        string $termCallId,
     ): array {
         try {
             return $this->ns->transcription($domainName, $jobId, $month, $origCallId, $termCallId);
@@ -245,6 +301,40 @@ final class CallProcessor
 
             throw $e;
         }
+    }
+
+    /** NetSapiens answers 403 "Bad request. Invalid domain or callids." for a mis-spelled domain. */
+    private static function isDomainRejection(NsException $e): bool
+    {
+        if ($e->status !== 403) {
+            return false;
+        }
+
+        $body = (string) ($e->responseBody ?? '') . ' ' . $e->getMessage();
+
+        return stripos($body, 'invalid domain') !== false;
+    }
+
+    /** Exact spelling of the domain as NetSapiens lists it, or null when it is not visible. */
+    private function canonicalDomain(string $domainName): ?string
+    {
+        if ($this->domainIndex === null) {
+            $this->domainIndex = [];
+
+            try {
+                foreach ($this->ns->domains() as $row) {
+                    $name = trim((string) ($row['domain'] ?? $row['domain-name'] ?? $row['name'] ?? ''));
+
+                    if ($name !== '') {
+                        $this->domainIndex[strtolower($name)] = $name;
+                    }
+                }
+            } catch (NsException) {
+                $this->domainIndex = [];
+            }
+        }
+
+        return $this->domainIndex[strtolower($domainName)] ?? null;
     }
 
     /** Our own placeholder id ("cdr-<hash>") can never be used against the API. */

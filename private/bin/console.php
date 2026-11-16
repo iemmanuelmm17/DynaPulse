@@ -401,34 +401,105 @@ try {
             $rawCdr = is_array($rawCdr) ? $rawCdr : [];
             $reference = TranscriptionReference::fromCdr($rawCdr);
 
-            $out('Call #' . $callId . ' — ' . (string) ($call['domain_name'] ?? '') . ' · ' . (string) ($call['started_at'] ?? '') . ' UTC');
-            $out('  stored transcript status  ' . (string) ($call['transcript_status'] ?? ''));
-            $out('  has_transcript            ' . (int) ($call['has_transcript'] ?? 0));
-            $out('  job id                    ' . ($jobId !== '' ? $jobId : '(empty — the CDR carried no call-intelligence-job-id)'));
-            $out('  date (YYYYMM)             ' . $date);
-            $out('  orig_callid               ' . ($origCallId !== '' ? $origCallId : '(empty)'));
-            $out('  term_callid               ' . ($termCallId !== '' ? $termCallId : '(empty)'));
+            // Precedence: the CDR's own prefilled link, then the CDR fields, then the
+            // row we stored at ingest. Our synthetic cdr-<hash> ids are never used.
+            $cdrOrig = trim((string) ($rawCdr['call-orig-call-id'] ?? ''));
+            $cdrTerm = trim((string) ($rawCdr['call-term-call-id'] ?? ''));
+            $cdrJob = trim((string) ($rawCdr['call-intelligence-job-id'] ?? ''));
+            $cdrStart = trim((string) ($rawCdr['call-start-datetime'] ?? ''));
+            $cdrDomain = '';
+            $cdrDomainKey = 'domain';
 
-            if ($reference !== null) {
-                $out('');
-                $out('  prefilled-transcription-api found in the CDR (used in preference):');
-                $out('    domain      ' . $reference->domain);
-                $out('    id          ' . $reference->jobId);
-                $out('    date        ' . $reference->month);
-                $out('    orig_callid ' . $reference->origCallId);
-                $out('    term_callid ' . $reference->termCallId);
+            foreach (['call-term-domain', 'call-orig-domain', 'domain'] as $key) {
+                $candidate = trim((string) ($rawCdr[$key] ?? ''));
 
-                $domainName = (string) ($call['domain_name'] ?? '');
-                if ($reference->domain !== '' && $reference->domain !== $domainName) {
-                    $out('');
-                    $out('  note: the domain row is spelled "' . $domainName . '" but NetSapiens uses "'
-                        . $reference->domain . '";');
-                    $out('        `php bin/console.php domains:sync` (Administration -> Domains -> Import) re-spells it.');
+                if ($candidate !== '') {
+                    $cdrDomain = $candidate;
+                    $cdrDomainKey = $key;
+                    break;
                 }
-            } else {
+            }
+
+            $resolve = static function (array $pairs): array {
+                $synthetic = null;
+
+                foreach ($pairs as [$value, $source]) {
+                    $value = trim((string) $value);
+
+                    if ($value === '') {
+                        continue;
+                    }
+
+                    if (str_starts_with($value, 'cdr-')) {
+                        $synthetic ??= [$value, $source . ' — our synthetic id, unusable'];
+
+                        continue;
+                    }
+
+                    return [$value, $source];
+                }
+
+                return $synthetic ?? ['', 'nothing'];
+            };
+
+            [$probeDomain, $domainSource] = $resolve([
+                [$reference?->domain ?? '', "the CDR's prefilled link"],
+                [$cdrDomain, 'the CDR (' . $cdrDomainKey . ')'],
+                [(string) ($call['domain_name'] ?? ''), 'the stored row'],
+            ]);
+
+            [$probeJob, $jobSource] = $resolve([
+                [$reference?->jobId ?? '', "the CDR's prefilled link"],
+                [$cdrJob, 'the CDR (call-intelligence-job-id)'],
+                [$jobId, 'the row (transcript_job_id)'],
+            ]);
+
+            [$probeDate, $dateSource] = $resolve([
+                [$reference?->month ?? '', "the CDR's prefilled link"],
+                [$cdrStart !== '' ? Time::yearMonth($cdrStart, 'UTC') : '', 'the CDR start (call-start-datetime, UTC)'],
+                [$date, 'the row start (' . $timezone . ')'],
+            ]);
+
+            [$probeOrig, $origSource] = $resolve([
+                [$reference?->origCallId ?? '', "the CDR's prefilled link"],
+                [$cdrOrig, 'the CDR (call-orig-call-id)'],
+                [$origCallId !== '' ? $origCallId : (string) ($call['call_id'] ?? ''), 'the row (orig_call_id)'],
+            ]);
+
+            [$probeTerm, $termSource] = $resolve([
+                [$reference?->termCallId ?? '', "the CDR's prefilled link"],
+                [$cdrTerm, 'the CDR (call-term-call-id)'],
+                [$termCallId, 'the row (term_call_id)'],
+            ]);
+
+            $out('Call #' . $callId . ' — ' . (string) ($call['domain_name'] ?? '') . ' · started '
+                . (string) ($call['started_at'] ?? '(unknown)') . ' UTC');
+            $out('  transcript status  ' . (string) ($call['transcript_status'] ?? '')
+                . '   ·   has_transcript ' . (int) ($call['has_transcript'] ?? 0)
+                . ($reference !== null ? '   ·   the CDR carries a prefilled-transcription-api' : ''));
+
+            if ($reference === null) {
+                $out('  no prefilled-transcription-api in the stored CDR — the lookup below is built');
+                $out('  from the CDR fields and the NetSapiens spelling of the domain.');
+            }
+
+            $out('');
+            $out('  resolved lookup');
+            foreach ([
+                'domain' => [$probeDomain, $domainSource],
+                'job id' => [$probeJob, $jobSource],
+                'date' => [$probeDate, $dateSource],
+                'orig_callid' => [$probeOrig, $origSource],
+                'term_callid' => [$probeTerm, $termSource],
+            ] as $label => [$value, $source]) {
+                $out(sprintf('    %-12s %s   [%s]', $label, $value !== '' ? $value : '(empty)', $source));
+            }
+
+            $domainName = (string) ($call['domain_name'] ?? '');
+            if ($probeDomain !== '' && $domainName !== '' && $probeDomain !== $domainName) {
                 $out('');
-                $out('  no prefilled-transcription-api in the stored CDR — the lookup is built from the');
-                $out('  call row and the NetSapiens spelling of the domain.');
+                $out('  note: the stored row says "' . $domainName . '" but the lookup uses "' . $probeDomain . '";');
+                $out('        NetSapiens matches domains exactly, so the row gets re-spelled automatically.');
             }
 
             if ($option('cdr') !== null) {
@@ -445,18 +516,40 @@ try {
                 $out('  raw_cdr keys: ' . implode(', ', array_slice(array_keys($rawCdr), 0, 40)));
             }
 
-            if ($jobId === '' && ($reference === null || $reference->jobId === '')) {
+            if ($probeJob === '') {
                 $out('');
                 $out('Without a job id there is nothing to fetch: Call Intelligence was not enabled for');
                 $out('this call when the CDR was written. Reprocess after enabling it on the domain.');
                 break;
             }
 
-            $probeDomain = $reference !== null && $reference->domain !== '' ? $reference->domain : (string) ($call['domain_name'] ?? '');
-            $probeJob = $reference !== null && $reference->jobId !== '' ? $reference->jobId : $jobId;
-            $probeDate = $reference !== null && $reference->month !== '' ? $reference->month : $date;
-            $probeOrig = $reference !== null && $reference->origCallId !== '' ? $reference->origCallId : $origCallId;
-            $probeTerm = $reference !== null && $reference->termCallId !== '' ? $reference->termCallId : $termCallId;
+            // NetSapiens matches the domain exactly; ask it how the domain is spelled.
+            if ($probeDomain !== '') {
+                try {
+                    $listed = null;
+
+                    foreach ($ns->domains() as $nsRow) {
+                        $nsName = trim((string) ($nsRow['domain'] ?? $nsRow['domain-name'] ?? $nsRow['name'] ?? ''));
+
+                        if ($nsName !== '' && strcasecmp($nsName, $probeDomain) === 0) {
+                            $listed = $nsName;
+
+                            break;
+                        }
+                    }
+
+                    if ($listed !== null && $listed !== $probeDomain) {
+                        $out('');
+                        $out('  NetSapiens lists the domain as "' . $listed . '" — probing with that spelling.');
+                        $probeDomain = $listed;
+                    } elseif ($listed === null) {
+                        $out('');
+                        $out('  warning: /domains does not list "' . $probeDomain . '" for this API key.');
+                    }
+                } catch (NsException) {
+                    // The domain list is a nicety; the probe below is the real answer.
+                }
+            }
 
             $out('');
             $out('GET /domains/' . $probeDomain . '/transcriptions?id=' . $probeJob . '&date=' . $probeDate
@@ -469,8 +562,11 @@ try {
                 $body = trim((string) preg_replace('/\s+/', ' ', (string) $e->responseBody));
                 $out('  body: ' . ($body !== '' ? substr($body, 0, 400) : '(empty)'));
                 $out('');
-                $out('  404 here means NetSapiens has no transcription row for that job/date/call id yet;');
-                $out('  400 means the identifiers were rejected; 403 means the API key cannot read it.');
+                $out('  404 means NetSapiens has no transcription row for that job/date/call id yet.');
+                $out('  400 means the identifiers were rejected.');
+                $out('  403 "Bad request. Invalid domain or callids." means the domain is spelled differently');
+                $out('      from the one NetSapiens knows, or one of the call ids is missing.');
+                $out('  403 with any other body means the API key cannot read that domain.');
                 break;
             }
 

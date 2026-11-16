@@ -269,8 +269,9 @@ absolute PHP binary path, e.g.
 
 Useful diagnostics: `console.php status` (counters plus per-domain last poll / last error),
 `console.php ns:test` (checks the API key, the domain list and a real CDR query),
-`console.php transcript:test --call=ID [--apply] [--cdr]` (fetches that call's Call Intelligence payload
-and shows what was parsed; `--cdr` dumps the stored CDR identity and every raw key),
+`console.php transcript:test --call=ID [--apply] [--cdr]` (shows where every Call Intelligence identifier
+came from, then fetches that call's payload and shows what was parsed; `--cdr` dumps the stored CDR identity
+and every raw key),
 `console.php calls:reprocess` (retries calls that have a job id but no stored transcript, and repairs the
 call ids / job id of rows ingested without them),
 `console.php domains:sync` (import the domains the API key can see; used by *Administration → Domains →
@@ -354,8 +355,8 @@ php bin\console.php process --limit=10 --budget=45
 | Login says credentials were not accepted | `NS_CLIENT_ID`/`NS_CLIENT_SECRET` wrong, or the NetSapiens user lacks API scope. Check `storage\logs`. |
 | Emails never arrive | SMTP AUTH disabled on the mailbox, wrong app password, or `MAIL_FROM_ADDRESS` not matching the sender. Use *Send test*. |
 | Alerts show “Email not configured” | `MAIL_*` values missing in `.env`; the portal logs `alert.blocked`. |
-| Calls appear but no transcripts | Run `php bin\console.php transcript:test --call=ID`. It prints the exact job id, `YYYYMM` and orig/term call ids sent to `/domains/{domain}/transcriptions`, the HTTP status and the parsed summary/segments. `--apply` saves the result and re-runs matching. `php bin\console.php calls:reprocess` retries every call that has a job id but no transcript (useful after a fix, or when processing gave up after 8 attempts) and repairs rows that were stored without call ids. |
-| `403 Bad request. Invalid domain or callids.` from `/transcriptions` | NetSapiens rejects the domain unless it is spelled exactly as configured (`1180.DynaCloud`, not `1180.dynacloud`) and both call ids are present. The portal now stores the CDR's `prefilled-transcription-api` link and replays it verbatim, adopts NetSapiens' spelling on ingest, and re-spells existing rows on *Administration → Domains → Import* (`php bin\console.php domains:sync`). `transcript:test --call=ID --cdr` prints both spellings side by side. |
+| Calls appear but no transcripts | Run `php bin\console.php transcript:test --call=ID`. It prints a *resolved lookup* block — domain, job id, `YYYYMM` and both call ids, each tagged with where the value came from (*the CDR's prefilled link*, *the CDR (`call-orig-call-id`)*, *the row*) — then the exact URL, the HTTP status and the parsed summary/segments. `--apply` saves the result and re-runs matching. `php bin\console.php calls:reprocess` retries every call that has a job id but no transcript (useful after a fix, or when processing gave up after 8 attempts) and repairs rows that were stored without call ids. |
+| `403 Bad request. Invalid domain or callids.` from `/transcriptions` | NetSapiens rejects the domain unless it is spelled exactly as configured (`1180.DynaCloud`, not `1180.dynacloud`) and both call ids are present. The portal replies on three levels: it replays the CDR's `prefilled-transcription-api` verbatim, it adopts NetSapiens' spelling on ingest, and when a request still comes back 403 it looks the domain up in `/domains`, retries once with the exact spelling and re-spells the row. `transcript:test --call=ID` prints every identifier with the place it came from. |
 | Transcript marked “unavailable” with no HTTP call made | The stored CDR carried neither call ids nor a `prefilled-transcription-api`. Call Intelligence was off for that call; reprocessing cannot invent the ids, so the call stays without a transcript. |
 | `transcript:test` says HTTP 404 | NetSapiens has no Call Intelligence row for that job/date/call id yet — the job may still be running, or the CDR carried no `call-intelligence-job-id` (Call Intelligence was off when the call happened). |
 | Transcript stored but alerts never fired | Keywords are matched against summary, topics and transcript text; check the keyword's *fields* and its severity against `alert_min_severity`. |

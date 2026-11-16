@@ -545,6 +545,52 @@ test('Call ids are recovered from the prefilled transcription link', function ()
     assertSame('768181475@172.16.10.228', $mapped['call_id'], 'the real call id is used instead of a cdr- hash');
 });
 
+test('A 403 from a mis-spelled domain is retried with the NetSapiens spelling', function () use ($container, $fakeNs, $transcriptionSample): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domainRepo->ensure('4570.dynacloud', 'DynaCloud 4570', 'Asia/Manila');
+
+    $fakeNs->exactDomain = '4570.DynaCloud';
+    $fakeNs->domainNames = ['4570.DynaCloud'];
+    $fakeNs->transcriptionFixtures['4570.DynaCloud:264687906'] = $transcriptionSample();
+
+    try {
+        // No prefilled link and no domain fields in the CDR: the stored row (lower
+        // case) is what gets sent first, exactly like the failing production run.
+        $cdr = [
+            'id' => 'f00dcafe00000000000000000000000000000071',
+            'call-orig-call-id' => '1122334455@10.0.0.9',
+            'call-term-call-id' => '20261116130211064111-abc123',
+            'call-start-datetime' => '2026-11-16T13:02:11+00:00',
+            'call-intelligence-job-id' => 264687906,
+        ];
+
+        /** @var IngestService $ingest */
+        $ingest = $container->get(IngestService::class);
+        $result = $ingest->ingestCdr('4570.dynacloud', $cdr, true);
+
+        $queries = array_values(array_filter(
+            $fakeNs->transcriptionQueries,
+            static fn (array $q): bool => $q['job'] === '264687906',
+        ));
+
+        assertSame(2, count($queries), 'the rejected spelling is retried once');
+        assertSame('4570.dynacloud', $queries[0]['domain'], 'first attempt used the stored row');
+        assertSame('4570.DynaCloud', $queries[1]['domain'], 'retry used the NetSapiens spelling');
+
+        $adopted = $domainRepo->findByDomain('4570.dynacloud');
+        assertSame('4570.DynaCloud', (string) $adopted['domain'], 'the row was re-spelled');
+
+        /** @var CallRepository $calls */
+        $calls = $container->get(CallRepository::class);
+        $row = $calls->find((int) $result['call_id']);
+        assertSame(1, (int) $row['has_transcript'], 'the transcript was stored after the retry');
+    } finally {
+        $fakeNs->exactDomain = null;
+        $fakeNs->domainNames = [];
+    }
+});
+
 test('A CDR without call ids is not sent to the API', function () use ($container, $fakeNs): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);

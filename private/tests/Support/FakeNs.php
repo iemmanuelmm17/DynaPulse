@@ -24,6 +24,12 @@ final class FakeNs implements NsGateway
     /** Throw this from domains() to simulate an API failure. */
     public ?\DynaPulse\NetSapiens\NsException $domainsError = null;
 
+    /** Exact spellings domains() reports; falls back to the CDR fixture keys. */
+    public array $domainNames = [];
+
+    /** When set, transcription() answers 403 for every other spelling of the domain. */
+    public ?string $exactDomain = null;
+
     public int $transcriptionCalls = 0;
 
     /** @return array<string, mixed> */
@@ -71,6 +77,14 @@ final class FakeNs implements NsGateway
             'term' => $termCallId,
         ];
 
+        if ($this->exactDomain !== null && $domain !== $this->exactDomain) {
+            throw new \DynaPulse\NetSapiens\NsException(
+                'Bad request. Invalid domain or callids. (HTTP 403)',
+                403,
+                '{"code":403,"message":"Bad request. Invalid domain or callids."}',
+            );
+        }
+
         $key = $domain . ':' . $jobId;
         if (!isset($this->transcriptionFixtures[$key])) {
             throw new \DynaPulse\NetSapiens\NsException('Transcription not ready', 404);
@@ -117,9 +131,11 @@ final class FakeNs implements NsGateway
             throw $this->domainsError;
         }
 
+        $names = $this->domainNames !== [] ? $this->domainNames : array_keys($this->cdrFixtures);
+
         return array_map(
             static fn (string $domain): array => ['domain' => $domain, 'description' => $domain],
-            array_keys($this->cdrFixtures),
+            $names,
         );
     }
 }
