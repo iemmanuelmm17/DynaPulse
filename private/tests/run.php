@@ -696,6 +696,31 @@ test('A CDR that only carries call-id is queried with that id', function () use 
     assertTrue((string) $row['transcript_status'] !== 'unavailable', 'a 404 leaves it pending, not unavailable');
 });
 
+test('upsertMapped keeps one row per job even when the call id changes', function () use ($container): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domain = $domainRepo->ensure('merge.test', 'Merge', 'UTC');
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+
+    $first = $calls->upsertMapped((int) $domain['id'], CdrMapper::map([
+        'call-start-datetime' => '2026-11-16T10:00:00+00:00',
+        'call-intelligence-job-id' => 424242,
+    ], 'merge.test'));
+
+    $second = $calls->upsertMapped((int) $domain['id'], CdrMapper::map([
+        'call-orig-call-id' => '236983231_121503242@208.93.44.140',
+        'call-term-call-id' => '20261116100000000000-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'call-start-datetime' => '2026-11-16T10:00:00+00:00',
+        'call-intelligence-job-id' => 424242,
+    ], 'merge.test'));
+
+    assertSame((int) $first['id'], (int) $second['id'], 'the row is reused');
+    assertSame('236983231_121503242@208.93.44.140', (string) $second['call_id'], 're-keyed');
+    assertSame((int) $first['id'], (int) $calls->findByJobId((int) $domain['id'], '424242')['id']);
+});
+
 test('Re-polling adopts the real call id instead of inserting a twin', function () use ($container): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);

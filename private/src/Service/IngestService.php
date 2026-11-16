@@ -99,25 +99,7 @@ final class IngestService
 
         $mapped = CdrMapper::map($cdr, $domainName);
         $existing = $this->calls->findByCallId((int) $domain['id'], (string) $mapped['call_id']);
-
-        // Re-polling with raw=yes replaces our synthetic "cdr-<hash>" call id with
-        // the real one. Match the existing row by job id and re-key it, so the
-        // same call is not stored twice and its id in the UI stays valid.
-        if ($existing === null && (string) ($mapped['transcript_job_id'] ?? '') !== '') {
-            $byJob = $this->calls->findByJobId((int) $domain['id'], (string) $mapped['transcript_job_id']);
-
-            if ($byJob !== null) {
-                $this->calls->adoptMapped((int) $byJob['id'], $mapped);
-                $existing = $byJob;
-                Logger::info('ingest.call_id_adopted', [
-                    'call_id' => $byJob['id'],
-                    'from' => (string) $byJob['call_id'],
-                    'to' => (string) $mapped['call_id'],
-                ]);
-            }
-        }
-
-        $call = $this->calls->upsertFromCdr((int) $domain['id'], $mapped);
+        $call = $this->calls->upsertMapped((int) $domain['id'], $mapped);
 
         $callId = (int) ($call['id'] ?? 0);
         $isNew = $existing === null;
@@ -174,7 +156,7 @@ final class IngestService
      */
     public function pollAll(?int $hours = null, ?string $only = null): array
     {
-        $summary = ['polled' => 0, 'errors' => [], 'calls' => 0, 'domains' => 0];
+        $summary = ['polled' => 0, 'errors' => [], 'calls' => 0, 'with_ids' => 0, 'domains' => 0];
         $only = $only !== null ? trim($only) : null;
 
         foreach ($this->domains->pollable() as $domain) {
@@ -187,6 +169,7 @@ final class IngestService
             try {
                 $result = $this->pollDomain($domain, $hours);
                 $summary['calls'] += $result['calls'];
+                $summary['with_ids'] += (int) ($result['with_ids'] ?? 0);
                 $summary['polled']++;
                 $summary['errors'] = array_merge($summary['errors'], $result['errors']);
             } catch (NsException $e) {
@@ -199,9 +182,23 @@ final class IngestService
         return $summary;
     }
 
+    /** Does a mapped CDR carry a real (non-synthetic) NetSapiens call id? */
+    private static function hasCallIds(array $mapped): bool
+    {
+        foreach (['orig_call_id', 'term_call_id'] as $field) {
+            $value = trim((string) ($mapped[$field] ?? ''));
+
+            if ($value !== '' && !str_starts_with($value, 'cdr-')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /**
      * @param array<string, mixed> $domain
-     * @return array{calls:int, new:int, errors:list<string>}
+     * @return array{calls:int, new:int, with_ids:int, errors:list<string>}
      */
     public function pollDomain(array $domain, ?int $hours = null): array
     {
@@ -222,6 +219,7 @@ final class IngestService
 
         $calls = 0;
         $new = 0;
+        $withIds = 0;
         $errors = [];
         $pageSize = 500;
         $maxPages = 10;
@@ -238,8 +236,13 @@ final class IngestService
                 try {
                     $mapped = CdrMapper::map($cdr, $domainName);
                     $existing = $this->calls->findByCallId((int) $domain['id'], (string) $mapped['call_id']);
-                    $this->calls->upsertFromCdr((int) $domain['id'], $mapped);
+                    $this->calls->upsertMapped((int) $domain['id'], $mapped);
                     $calls++;
+
+                    if (self::hasCallIds($mapped)) {
+                        $withIds++;
+                    }
+
                     if ($existing === null) {
                         $new++;
                     }
@@ -263,10 +266,11 @@ final class IngestService
             'window_start' => $startIso,
             'window_end' => $endIso,
             'calls' => $calls,
+            'with_ids' => $withIds,
             'new' => $new,
             'errors' => count($errors),
         ]);
 
-        return ['calls' => $calls, 'new' => $new, 'errors' => $errors];
+        return ['calls' => $calls, 'new' => $new, 'with_ids' => $withIds, 'errors' => $errors];
     }
 }

@@ -141,6 +141,28 @@ final class CallRepository
     }
 
     /**
+     * Upsert a mapped CDR, re-keying any existing row for the same Call
+     * Intelligence job so that a changed call id does not create a twin.
+     *
+     * @param array<string, mixed> $mapped
+     * @return array<string, mixed>
+     */
+    public function upsertMapped(int $domainId, array $mapped): array
+    {
+        $jobId = (string) ($mapped['transcript_job_id'] ?? '');
+
+        if ($this->findByCallId($domainId, (string) $mapped['call_id']) === null && $jobId !== '') {
+            $byJob = $this->findByJobId($domainId, $jobId);
+
+            if ($byJob !== null) {
+                $this->adoptMapped((int) $byJob['id'], $mapped);
+            }
+        }
+
+        return $this->upsertFromCdr($domainId, $mapped);
+    }
+
+    /**
      * Re-key an existing row to the identifiers of a freshly fetched CDR.
      *
      * A re-poll with raw=yes turns our synthetic "cdr-<hash>" call id into the

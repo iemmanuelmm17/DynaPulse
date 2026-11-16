@@ -19,7 +19,7 @@ declare(strict_types=1);
  *   php private/bin/console.php notify [--limit=20]
  *   php private/bin/console.php reports:run
  *   php private/bin/console.php prune
- *   php private/bin/console.php repair [--hours=168] [--limit=200]
+ *   php private/bin/console.php repair [--hours=168] [--limit=200] [--domain=1180.DynaCloud]
  *   php private/bin/console.php version
  *   php private/bin/console.php update [--branch=arena/c8955fd9-dynapulse]
  *   php private/bin/console.php status
@@ -66,7 +66,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.13';
+const DP_CODE_BUILD = '2026.11.16.14';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -430,6 +430,7 @@ try {
             $out('  reports:run                   send report schedules that are due');
             $out('  prune                         delete records older than the retention window');
             $out('  repair [--hours] [--limit]    poll, audit, retry the transcripts, drain the queue');
+            $out('                                add --domain=NAME to repair a single domain');
             $out('  status                        print counters and the last poll outcome');
             $out('  version                       print this build and what it supports');
             $out('  update [--branch=B] [--url=U] download this branch and replace the code in place');
@@ -478,11 +479,12 @@ try {
             $results = $ingest->pollAll($hours, $option('domain'));
 
             $out(sprintf(
-                'Polled %d of %d domain(s)%s: %d CDR row(s) seen, %d error(s).',
+                'Polled %d of %d domain(s)%s: %d CDR row(s) seen (%d with call ids), %d error(s).',
                 (int) $results['polled'],
                 (int) $results['domains'],
                 $hours !== null ? ' over ' . $hours . 'h' : '',
                 (int) $results['calls'],
+                (int) ($results['with_ids'] ?? 0),
                 count($results['errors']),
             ));
             foreach ($results['errors'] as $error) {
@@ -1191,12 +1193,14 @@ try {
             $out('  draining the queue. Safe to re-run.');
             $out('');
 
-            $out('[1/4] poll ' . $hours);
-            $polled = $repairIngest->pollAll($hours);
+            $only = $option('domain');
+            $out('[1/4] poll ' . $hours . ($only !== null ? ' --domain=' . $only : ''));
+            $polled = $repairIngest->pollAll($hours, $only);
             $out(sprintf(
-                '      %d CDR row(s) seen across %d domain(s), %d error(s).',
+                '      %d CDR row(s) seen across %d domain(s) (%d with call ids), %d error(s).',
                 (int) $polled['calls'],
                 (int) $polled['polled'],
+                (int) ($polled['with_ids'] ?? 0),
                 count($polled['errors']),
             ));
 
