@@ -10,6 +10,7 @@ declare(strict_types=1);
  *   php private/bin/console.php ns:test [--domain=acme.com] [--hours=24]
  *   php private/bin/console.php transcript:test --call=123 [--apply] [--raw]
  *   php private/bin/console.php calls:reprocess [--limit=50]
+ *   php private/bin/console.php calls:rematch [--limit=500] [--domain=1180.DynaCloud]
  *   php private/bin/console.php calls:audit [--limit=500] [--show=3]
  *   php private/bin/console.php calls:find --job=78920299
  *   php private/bin/console.php calls:dupes [--fix]
@@ -43,9 +44,12 @@ use DynaPulse\NetSapiens\TranscriptionReference;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
+use DynaPulse\Repository\KeywordRepository;
+use DynaPulse\Repository\MatchRepository;
 use DynaPulse\Repository\SettingsRepository;
 use DynaPulse\Service\CallProcessor;
 use DynaPulse\Service\IngestService;
+use DynaPulse\Service\KeywordMatcher;
 use DynaPulse\Service\NotificationSender;
 use DynaPulse\Service\NsDiagnostics;
 use DynaPulse\Service\ReportService;
@@ -66,7 +70,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.16';
+const DP_CODE_BUILD = '2026.11.16.18';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -421,6 +425,7 @@ try {
             $out('  transcript:test --call=ID     fetch one call\'s Call Intelligence payload (--apply saves it)');
             $out('                                add --cdr to print the stored CDR identity, --raw for the payload');
             $out('  calls:reprocess [--limit]     retry calls that have a job id but no stored transcript');
+            $out('  calls:rematch [--limit] [--domain]  re-run keyword matching after changing the scope');
             $out('  calls:audit [--limit] [--show] which identifiers the stored CDRs actually carry');
             $out('  calls:find --id= --job= --number=   locate a call by portal id, job id or number');
             $out('  calls:dupes [--fix]           find (and collapse) the same call stored twice');
@@ -1437,6 +1442,61 @@ try {
                 $out(sprintf('    %d call(s) kept no raw CDR at all: re-ingest with php bin/console.php poll 168', $missingEmpty));
             }
 
+            break;
+
+        case 'calls:rematch':
+            /** @var CallRepository $rematchCalls */
+            $rematchCalls = $container->get(CallRepository::class);
+            /** @var KeywordRepository $rematchKeywords */
+            $rematchKeywords = $container->get(KeywordRepository::class);
+            /** @var MatchRepository $rematchMatches */
+            $rematchMatches = $container->get(MatchRepository::class);
+            /** @var SettingsRepository $rematchSettings */
+            $rematchSettings = $container->get(SettingsRepository::class);
+            $rematchMatcher = new KeywordMatcher();
+
+            $scope = KeywordMatcher::defaultFields($rematchSettings);
+            $only = $option('domain');
+            $ids = $rematchCalls->idsWithTranscript($number('limit', 500, 1, 5000), $only);
+
+            $out('Re-running keyword matching over ' . count($ids) . ' call(s) that already have a transcript.');
+            $out('  default scope  ' . implode(' + ', $scope)
+                . ($option('domain') !== null ? '   ·   domain ' . $option('domain') : ''));
+            $out('  no alerts are sent by this command; it only rewrites the matches.');
+            $out('');
+
+            $withMatches = 0;
+            $total = 0;
+
+            foreach ($ids as $id) {
+                $row = $rematchCalls->find($id);
+
+                if ($row === null) {
+                    continue;
+                }
+
+                $found = $rematchMatcher->match($rematchKeywords->forDomain((int) $row['domain_id']), $row, $scope);
+                $rematchMatches->replaceForCall($id, (int) $row['domain_id'], $found);
+
+                if ($found !== []) {
+                    $withMatches++;
+                    $total += count($found);
+                    $out(sprintf(
+                        '  #%-6d %-22s %d match(es): %s',
+                        $id,
+                        Str::limit((string) ($row['domain_name'] ?? ($row['domain_id'] ?? '')), 22),
+                        count($found),
+                        implode(', ', array_map(
+                            static fn (array $match): string => $match['keyword_label'] . ' (' . $match['field'] . ')',
+                            $found,
+                        )),
+                    ));
+                }
+            }
+
+            $out('');
+            $out(sprintf('%d call(s) still match, %d match row(s) in total.', $withMatches, $total));
+            $out('Open a call to see its keywords, or run calls:rematch again after changing the scope.');
             break;
 
         case 'calls:reprocess':

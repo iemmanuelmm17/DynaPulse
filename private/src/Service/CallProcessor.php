@@ -236,7 +236,7 @@ final class CallProcessor
         }
 
         $activeKeywords = $this->keywords->forDomain((int) $fresh['domain_id']);
-        $found = $this->matcher->match($activeKeywords, $fresh);
+        $found = $this->matcher->match($activeKeywords, $fresh, $this->matchFields());
         $this->matches->replaceForCall($callId, (int) $fresh['domain_id'], $found);
 
         $fresh = $this->calls->find($callId) ?? $fresh;
@@ -365,6 +365,18 @@ final class CallProcessor
         }
 
         return $this->domainIndex[strtolower($domainName)] ?? null;
+    }
+
+    /**
+     * Keywords are compared against the Call Intelligence topics. Searching the
+     * summary as well is a switch in Settings, because the summary is free text
+     * written by the transcription engine and matches far more loosely.
+     *
+     * @return list<string>
+     */
+    private function matchFields(): array
+    {
+        return KeywordMatcher::defaultFields($this->settings);
     }
 
     /**

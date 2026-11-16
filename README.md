@@ -322,8 +322,11 @@ Import*),
 
 1. A completed call arrives (webhook or poller) and is stored with the raw CDR.
 2. The worker fetches Call Intelligence data: summary, topics, per-segment sentiment and percentages.
-3. Every **active** keyword is matched against the fields you chose (summary, topics, transcript,
-   caller number, called number) using phrase, whole-word or regex matching.
+3. Every **active** keyword is matched against the **Call Intelligence topics** — the tags
+   NetSapiens extracted for the call — using phrase, whole-word or regex matching. Each keyword can
+   also search the summary, the full transcript, the caller number or the called number; keywords
+   that tick nothing follow the *Keyword matching* switches in Settings (topics, plus the summary
+   and/or the transcript when those are enabled).
 4. Matches below the minimum severity are recorded but do not email.
 5. **One grouped email per call** goes to the domain’s active recipients (plus the global fallback
    list), so five keywords on one call produce one message, not five.
@@ -404,7 +407,7 @@ php bin\console.php process --limit=10 --budget=45
 | One domain has no transcripts at all | `php bin\console.php calls:audit` now prints a per-domain table: if `job id` is 0% for a domain, NetSapiens created no Call Intelligence job for those calls (the CDR carries `call-intelligence-job-id: null`), so there is nothing to fetch. Enable Call Intelligence / recording transcription for that domain in NetSapiens and confirm the calls have recordings. A healthy domain shows a non-null job id plus a `prefilled-transcription-api` on each CDR. |
 | Many calls say “the CDR carried no NetSapiens call ids” | `php bin\console.php calls:audit --show=3` prints the coverage per key plus full payloads of the offenders. If a fresh `poll 2` still yields CDRs without `call-orig-call-id`/`prefilled-transcription-api`, the API key is reading an older CDR shape — the audit output is what to send on. |
 | `transcript:test` says HTTP 404 | NetSapiens has no Call Intelligence row for that job/date/call id yet — the job may still be running, or the CDR carried no `call-intelligence-job-id` (Call Intelligence was off when the call happened). |
-| Transcript stored but alerts never fired | Keywords are matched against summary, topics and transcript text; check the keyword's *fields* and its severity against `alert_min_severity`. |
+| Transcript stored but alerts never fired | Keywords are matched against the Call Intelligence **topics** by default. If NetSapiens tagged the call with something else and the topic you watch never appears, tick *Summary* on the keyword (or enable *Also match the summary* in Settings). Also check the severity against `alert_min_severity` and re-run `php bin\console.php calls:reprocess`. |
 | Recording button 404s | No recording on file in NetSapiens (recording disabled for that user), or the media URL expired before download. Calls whose stored CDR had no call ids are never looked up (their `cdr-…` id is not a NetSapiens id) and report no recording instead of a 404. |
 | **No calls at all** (dashboard and Calls list empty) | Nothing has been ingested yet. Run `php bin\console.php ns:test` — it tells you whether the API key works, which domains are configured and whether `/domains/{domain}/cdrs` returns rows. Then `php bin\console.php domains:sync` and `php bin\console.php poll 72`. Without the webhook or a scheduled `poll`, no CDR ever reaches the portal. The same information is on *Settings → Environment health → Ingestion*. |
 | `ns:test` says 0 CDR rows for a domain | The window is empty, the domain name does not match NetSapiens exactly, or the API key cannot read CDRs for that domain (HTTP 403). Try `--hours=168` and check the domain name in NetSapiens. |

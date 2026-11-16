@@ -757,6 +757,111 @@ test('Re-polling adopts the real call id instead of inserting a twin', function 
     assertSame((int) $before['id'], (int) $byJob['id'], 'the job id still points at one row');
 });
 
+test('Keywords are matched against Call Intelligence topics, not the summary', function () use ($container, $fakeNs): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domain = $domainRepo->ensure('topics.test', 'Topics', 'UTC');
+    $domainId = (int) $domain['id'];
+
+    /** @var KeywordRepository $keywordRepo */
+    $keywordRepo = $container->get(KeywordRepository::class);
+    $keywordRepo->create([
+        'domain_id' => $domainId,
+        'label' => 'Billing',
+        'pattern' => 'billing',
+        'match_type' => 'word',
+        'severity' => 'high',
+        'fields' => [],
+        'case_sensitive' => 0,
+        'active' => 1,
+        'notes' => '',
+    ]);
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $fakeNs->transcriptionFixtures['topics.test:5150'] = [
+        'call-intelligence-processing-status' => 'finished',
+        'call-intelligence-summary' => 'The customer needed help with a billing question.',
+        'call-intelligence-topics-top' => ['Account', 'Support'],
+        'call-intelligence-segments' => [
+            ['speaker' => 'Agent', 'comment' => 'Let me look at that.', 'sentiment' => 'Neutral', 'start-time' => '1', 'end-time' => '2'],
+        ],
+    ];
+
+    // Summary mentions billing, topics do not: no match while topics is the scope.
+    $result = $ingest->ingestCdr('topics.test', [
+        'domain' => 'topics.test',
+        'call-orig-call-id' => '9001@10.0.0.9',
+        'call-term-user' => '6002',
+        'call-start-datetime' => '2026-11-18T10:00:00+00:00',
+        'call-total-duration-seconds' => 30,
+        'call-intelligence-job-id' => 5150,
+    ], true);
+
+    /** @var MatchRepository $matches */
+    $matches = $container->get(MatchRepository::class);
+    assertSame([], $matches->forCall((int) $result['call_id']), 'the summary is not searched by default');
+
+    // Same call, but now the summary is in scope.
+    $settings = $container->get(\DynaPulse\Repository\SettingsRepository::class);
+    $settings->set('match_in_summary', '1');
+
+    /** @var CallProcessor $processor */
+    $processor = $container->get(CallProcessor::class);
+    $processor->process((int) $result['call_id'], true);
+
+    $found = $matches->forCall((int) $result['call_id']);
+    assertSame(1, count($found), 'the summary matches once it is enabled');
+    assertSame('summary', (string) $found[0]['field']);
+
+    $settings->set('match_in_summary', '0');
+});
+
+test('A topic tag matches in the default scope', function () use ($container, $fakeNs): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domain = $domainRepo->ensure('tags.test', 'Tags', 'UTC');
+
+    /** @var KeywordRepository $keywordRepo */
+    $keywordRepo = $container->get(KeywordRepository::class);
+    $keywordRepo->create([
+        'domain_id' => (int) $domain['id'],
+        'label' => 'Reboot',
+        'pattern' => 'reboot',
+        'match_type' => 'phrase',
+        'severity' => 'medium',
+        'fields' => [],
+        'case_sensitive' => 0,
+        'active' => 1,
+        'notes' => '',
+    ]);
+
+    $fakeNs->transcriptionFixtures['tags.test:6161'] = [
+        'call-intelligence-processing-status' => 'finished',
+        'call-intelligence-summary' => 'Routine check-in.',
+        'call-intelligence-topics-top' => ['Modem Reboot', 'Troubleshooting'],
+        'call-intelligence-segments' => [
+            ['speaker' => 'Agent', 'comment' => 'I will reboot it now.', 'sentiment' => 'Neutral', 'start-time' => '2', 'end-time' => '4'],
+        ],
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('tags.test', [
+        'domain' => 'tags.test',
+        'call-orig-call-id' => '9002@10.0.0.9',
+        'call-start-datetime' => '2026-11-18T11:00:00+00:00',
+        'call-total-duration-seconds' => 20,
+        'call-intelligence-job-id' => 6161,
+    ], true);
+
+    /** @var MatchRepository $matches */
+    $matches = $container->get(MatchRepository::class);
+    $found = $matches->forCall((int) $result['call_id']);
+    assertSame(1, count($found), 'the topic tag matches');
+    assertSame('topics', (string) $found[0]['field']);
+});
+
 test('calls:audit sees which identifiers the stored CDRs carry', function () use ($container): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);

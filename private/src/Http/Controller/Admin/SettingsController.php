@@ -135,6 +135,8 @@ final class SettingsController extends BaseController
             'alerts_enabled' => $request->post('alerts_enabled') === '1' ? '1' : '0',
             'alert_min_severity' => $minSeverity,
             'alert_include_transcript' => $request->post('alert_include_transcript') === '1' ? '1' : '0',
+            'match_in_summary' => $request->post('match_in_summary') === '1' ? '1' : '0',
+            'match_in_transcript' => $request->post('match_in_transcript') === '1' ? '1' : '0',
             'alert_extra_recipients' => implode(', ', $extra),
             'default_report_recipients' => implode(', ', $reportDefaults),
             'transcript_max_attempts' => (string) max(1, min(30, (int) $request->post('transcript_max_attempts', 8))),

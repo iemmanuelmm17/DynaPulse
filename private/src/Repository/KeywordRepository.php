@@ -11,7 +11,8 @@ final class KeywordRepository
 {
     public const MATCH_TYPES = ['phrase', 'word', 'regex'];
 
-    public const FIELDS = ['summary', 'topics', 'transcript', 'caller_number', 'called_number'];
+    /** @var list<string> */
+    public const FIELDS = ['topics', 'summary', 'transcript', 'caller_number', 'called_number'];
 
     public const SEVERITIES = ['low', 'medium', 'high', 'critical'];
 

@@ -421,6 +421,36 @@ final class CallRepository
         return array_map(static fn (array $row): int => (int) $row['id'], $rows);
     }
 
+    /**
+     * Calls that already hold a transcript, newest first. Used by
+     * `console.php calls:rematch` after the keyword scope changes.
+     *
+     * @return list<int>
+     */
+    public function idsWithTranscript(int $limit = 500, ?string $domain = null): array
+    {
+        $limit = max(1, min(5000, $limit));
+        $sql = 'SELECT c.id FROM calls c';
+        $params = [];
+
+        if ($domain !== null && $domain !== '') {
+            $sql .= ' JOIN domains d ON d.id = c.domain_id';
+        }
+
+        $sql .= " WHERE c.has_transcript = 1";
+
+        if ($domain !== null && $domain !== '') {
+            $sql .= ' AND d.domain = :domain';
+            $params['domain'] = $domain;
+        }
+
+        $sql .= ' ORDER BY COALESCE(c.started_at, c.created_at) DESC LIMIT ' . $limit;
+
+        $rows = $this->db->select($sql, $params);
+
+        return array_map(static fn (array $row): int => (int) $row['id'], $rows);
+    }
+
     /** Newest started_at in the table, or null when nothing was ever ingested. */
     public function latestStartedAt(): ?string
     {

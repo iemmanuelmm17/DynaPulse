@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace DynaPulse\Service;
 
+use DynaPulse\Repository\SettingsRepository;
 use DynaPulse\Support\Logger;
 
 /**
@@ -14,14 +15,45 @@ use DynaPulse\Support\Logger;
  */
 final class KeywordMatcher
 {
-    public const DEFAULT_FIELDS = ['summary', 'topics', 'transcript'];
+    /**
+     * Call Intelligence tags are the vocabulary NetSapiens itself extracted, so
+     * they are what keywords are compared against by default. The free-text
+     * summary is opt-in (Settings → "also match the summary"), the full
+     * transcript is opt-in per keyword.
+     */
+    public const DEFAULT_FIELDS = ['topics'];
+
+    /**
+     * The scope used for keywords that picked none of their own: topics, plus
+     * the summary and/or transcript when the switches in Settings are on.
+     *
+     * @return list<string>
+     */
+    public static function defaultFields(SettingsRepository $settings): array
+    {
+        $fields = self::DEFAULT_FIELDS;
+
+        if ($settings->bool('match_in_summary')) {
+            $fields[] = 'summary';
+        }
+
+        if ($settings->bool('match_in_transcript')) {
+            $fields[] = 'transcript';
+        }
+
+        return $fields;
+    }
+
+    /** Fields a keyword can be matched against, in display order. */
+    public const FIELDS = ['topics', 'summary', 'transcript', 'caller_number', 'called_number'];
 
     /**
      * @param list<array<string, mixed>> $keywords
      * @param array<string, mixed> $call
+     * @param list<string> $defaultFields used when a keyword picked none of its own
      * @return list<array{keyword_id:?int, keyword_label:string, field:string, snippet:string, severity:string}>
      */
-    public function match(array $keywords, array $call): array
+    public function match(array $keywords, array $call, array $defaultFields = self::DEFAULT_FIELDS): array
     {
         $haystacks = $this->haystacks($call);
         $matches = [];
@@ -37,7 +69,7 @@ final class KeywordMatcher
             $fields = (array) ($keyword['fields'] ?? []);
 
             if ($fields === []) {
-                $fields = self::DEFAULT_FIELDS;
+                $fields = $defaultFields !== [] ? $defaultFields : self::DEFAULT_FIELDS;
             }
 
             foreach ($fields as $field) {
@@ -121,18 +153,37 @@ final class KeywordMatcher
         return ['offset' => $offset, 'length' => mb_strlen($pattern, 'UTF-8')];
     }
 
-    /** @param array<string, mixed> $call @return array<string, string> */
-    public function haystacks(array $call): array
+    /** Topics as one searchable string, one tag per line for readable snippets. */
+    public function topicString(mixed $topics): string
     {
-        $topics = $call['transcript_topics'] ?? [];
         if (is_string($topics)) {
             $decoded = json_decode($topics, true);
             $topics = is_array($decoded) ? $decoded : [$topics];
         }
 
+        $tags = [];
+
+        foreach ((array) $topics as $topic) {
+            if (is_array($topic)) {
+                $topic = $topic['topic'] ?? $topic['label'] ?? $topic['name'] ?? '';
+            }
+
+            $topic = trim((string) $topic);
+
+            if ($topic !== '') {
+                $tags[] = $topic;
+            }
+        }
+
+        return implode(', ', $tags);
+    }
+
+    /** @param array<string, mixed> $call @return array<string, string> */
+    public function haystacks(array $call): array
+    {
         return [
             'summary' => trim((string) ($call['transcript_summary'] ?? '')),
-            'topics' => implode(', ', array_map('strval', (array) $topics)),
+            'topics' => $this->topicString($call['transcript_topics'] ?? []),
             'transcript' => trim((string) ($call['transcript_text'] ?? '')),
             'caller_number' => trim((string) ($call['caller_number'] ?? '')),
             'called_number' => trim((string) ($call['called_number'] ?? '')),

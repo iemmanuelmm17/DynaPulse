@@ -77,6 +77,25 @@ $truthy = static fn (string $key): bool => in_array(strtolower($value($key)), ['
                 </div>
 
                 <div class="field">
+                    <span class="label">Keyword matching</span>
+                    <div class="row" style="gap:20px;">
+                        <label class="check">
+                            <input type="checkbox" name="match_in_summary" value="1" <?= $truthy('match_in_summary') ? 'checked' : '' ?>>
+                            Also match the summary
+                        </label>
+                        <label class="check">
+                            <input type="checkbox" name="match_in_transcript" value="1" <?= $truthy('match_in_transcript') ? 'checked' : '' ?>>
+                            Also match the full transcript
+                        </label>
+                    </div>
+                    <span class="hint">
+                        Keywords are always compared against the Call Intelligence topics. The summary is
+                        free text written by the transcription engine, so it matches more loosely; the transcript
+                        most loosely of all. A keyword that ticks its own fields ignores these two switches.
+                    </span>
+                </div>
+
+                <div class="field">
                     <label for="alert_extra_recipients">Always copy (alerts)</label>
                     <input type="text" id="alert_extra_recipients" name="alert_extra_recipients" value="<?= e($value('alert_extra_recipients')) ?>" placeholder="security@acme.com, noc@acme.com">
                     <span class="hint">Added to every alert email in addition to the domain recipient list.</span>

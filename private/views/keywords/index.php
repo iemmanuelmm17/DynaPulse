@@ -12,11 +12,11 @@
 use DynaPulse\Http\Context;
 
 $action = $editing !== null ? path_url('keywords/' . (int) $editing['id']) : path_url('keywords');
-$selectedFields = $editing['fields'] ?? ['summary', 'topics', 'transcript'];
+$selectedFields = $editing['fields'] ?? ['topics'];
 $fieldLabels = [
+    'topics' => 'Topics (recommended)',
     'summary' => 'Summary',
-    'topics' => 'Topics',
-    'transcript' => 'Transcript',
+    'transcript' => 'Full transcript',
     'caller_number' => 'Caller number',
     'called_number' => 'Called number',
 ];
@@ -72,6 +72,11 @@ $fieldLabels = [
                             </label>
                         <?php endforeach; ?>
                     </div>
+                    <span class="hint">
+                        Keywords are compared against the Call Intelligence topics by default — the tags
+                        NetSapiens extracted for the call. Tick Summary to search the narrative as well; leave
+                        all boxes clear and Settings decides (topics, plus the summary when enabled there).
+                    </span>
                 </div>
 
                 <div class="grid grid--form">
@@ -158,6 +163,9 @@ $fieldLabels = [
                         <td><span class="badge"><?= e((string) $keyword['match_type']) ?></span></td>
                         <td>
                             <div class="row" style="gap:4px;">
+                                <?php if ((array) $keyword['fields'] === []): ?>
+                                    <span class="chip" style="font-size:10.5px;" title="Resolved from Settings">default</span>
+                                <?php endif; ?>
                                 <?php foreach ((array) $keyword['fields'] as $field): ?>
                                     <span class="chip" style="font-size:10.5px;"><?= e($fieldLabels[$field] ?? $field) ?></span>
                                 <?php endforeach; ?>

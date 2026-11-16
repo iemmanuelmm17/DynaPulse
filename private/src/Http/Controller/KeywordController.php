@@ -144,9 +144,9 @@ final class KeywordController extends BaseController
             throw new HttpException(422, 'That regular expression is not valid.');
         }
 
-        if ($fields === []) {
-            $fields = KeywordMatcher::DEFAULT_FIELDS;
-        }
+        // No boxes ticked means "use the default scope", which is resolved at match
+        // time (topics, plus the summary when Settings enables it) rather than
+        // frozen here — so flipping the switch applies to these keywords too.
 
         return [
             'label' => $label,

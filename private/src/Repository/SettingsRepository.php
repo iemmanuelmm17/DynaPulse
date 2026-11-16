@@ -17,6 +17,8 @@ final class SettingsRepository
         'alerts_enabled' => '1',
         'alert_min_severity' => 'low',
         'alert_include_transcript' => '1',
+        'match_in_summary' => '0',
+        'match_in_transcript' => '0',
         'alert_extra_recipients' => '',
         'default_report_recipients' => '',
         'transcript_max_attempts' => '8',
