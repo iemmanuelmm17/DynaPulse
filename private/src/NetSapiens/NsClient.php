@@ -60,13 +60,55 @@ final class NsClient implements NsGateway
         return self::listOf($result);
     }
 
-    public function transcription(string $domain, string $jobId, string $yearMonth, string $callId): array
-    {
-        return $this->request('GET', '/domains/' . rawurlencode($domain) . '/transcriptions', [
-            'id' => $jobId,
-            'date' => $yearMonth,
-            'callid' => $callId,
-        ]);
+    public function transcription(
+        string $domain,
+        string $jobId,
+        string $yearMonth,
+        string $origCallId = '',
+        string $termCallId = '',
+    ): array {
+        $path = '/domains/' . rawurlencode($domain) . '/transcriptions';
+        $base = ['id' => $jobId, 'date' => $yearMonth];
+
+        // NetSapiens deployments differ in how they identify the row: the CDR's
+        // own "prefilled-transcription-api" uses orig_callid + term_callid, while
+        // older builds accept a single callid (which is the term leg). Try the
+        // documented shape first and fall back only on "not found / bad request",
+        // so auth or server problems are never masked.
+        $attempts = [];
+
+        if ($origCallId !== '' || $termCallId !== '') {
+            $attempts[] = $base + array_filter([
+                'orig_callid' => $origCallId,
+                'term_callid' => $termCallId,
+            ], static fn (string $value): bool => $value !== '');
+        }
+
+        foreach ([$termCallId, $origCallId] as $callId) {
+            if ($callId !== '') {
+                $attempts[] = $base + ['callid' => $callId];
+            }
+        }
+
+        if ($attempts === []) {
+            $attempts[] = $base;
+        }
+
+        $last = null;
+
+        foreach ($attempts as $query) {
+            try {
+                return $this->request('GET', $path, $query);
+            } catch (NsException $e) {
+                $last = $e;
+
+                if (!$e->isNotFound() && $e->status !== 400) {
+                    throw $e;
+                }
+            }
+        }
+
+        throw $last ?? new NsException('Transcription request failed without a response.');
     }
 
     public function recording(string $domain, string $callId): ?array

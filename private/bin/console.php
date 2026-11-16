@@ -8,6 +8,8 @@ declare(strict_types=1);
  *   php private/bin/console.php migrate
  *   php private/bin/console.php key:generate [--force]
  *   php private/bin/console.php ns:test [--domain=acme.com] [--hours=24]
+ *   php private/bin/console.php transcript:test --call=123 [--apply] [--raw]
+ *   php private/bin/console.php calls:reprocess [--limit=50]
  *   php private/bin/console.php domains:sync
  *   php private/bin/console.php poll [hours]
  *   php private/bin/console.php process [--limit=25] [--budget=50]
@@ -30,6 +32,7 @@ use DynaPulse\Mail\MailException;
 use DynaPulse\Mail\Mailer;
 use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsException;
+use DynaPulse\NetSapiens\Transcription;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
@@ -41,6 +44,7 @@ use DynaPulse\Service\NsDiagnostics;
 use DynaPulse\Service\ReportService;
 use DynaPulse\Support\Config;
 use DynaPulse\Support\Logger;
+use DynaPulse\Support\Str;
 use DynaPulse\Support\Time;
 
 if (PHP_SAPI !== 'cli') {
@@ -119,6 +123,8 @@ try {
             $out('  key:generate [--force]        write a random APP_KEY into .env');
             $out('  poll [hours]                  pull recent CDRs for every pollable domain');
             $out('  ns:test [--domain] [--hours]  check NetSapiens credentials and CDR access');
+            $out('  transcript:test --call=ID     fetch one call\'s Call Intelligence payload (--apply saves it)');
+            $out('  calls:reprocess [--limit]     retry calls that have a job id but no stored transcript');
             $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
             $out('  notify [--limit]              send queued alert emails');
@@ -341,6 +347,135 @@ try {
             if ($added === []) {
                 $out('  Nothing new — toggle the domains you monitor under Administration → Domains.');
             }
+            break;
+
+        case 'transcript:test':
+            $callId = (int) ($option('call') ?? 0);
+
+            if ($callId <= 0) {
+                $fail('Usage: php bin/console.php transcript:test --call=123 [--apply] [--raw]');
+            }
+
+            /** @var CallRepository $callRepo */
+            $callRepo = $container->get(CallRepository::class);
+            /** @var NsGateway $ns */
+            $ns = $container->get(NsGateway::class);
+
+            $call = $callRepo->find($callId);
+
+            if ($call === null) {
+                $fail('No call with id ' . $callId . ' in the database.');
+            }
+
+            $jobId = trim((string) ($call['transcript_job_id'] ?? ''));
+            $origCallId = trim((string) ($call['orig_call_id'] ?? ''));
+            $termCallId = trim((string) ($call['term_call_id'] ?? ''));
+
+            if ($origCallId === '' && $termCallId === '') {
+                $origCallId = (string) ($call['call_id'] ?? '');
+            }
+
+            $timezone = (string) ($call['domain_timezone'] ?? $config->get('app.timezone', 'UTC'));
+            $date = Time::yearMonth((string) ($call['started_at'] ?? ''), $timezone);
+
+            $out('Call #' . $callId . ' — ' . (string) ($call['domain_name'] ?? '') . ' · ' . (string) ($call['started_at'] ?? '') . ' UTC');
+            $out('  stored transcript status  ' . (string) ($call['transcript_status'] ?? ''));
+            $out('  has_transcript            ' . (int) ($call['has_transcript'] ?? 0));
+            $out('  job id                    ' . ($jobId !== '' ? $jobId : '(empty — the CDR carried no call-intelligence-job-id)'));
+            $out('  date (YYYYMM)             ' . $date);
+            $out('  orig_callid               ' . ($origCallId !== '' ? $origCallId : '(empty)'));
+            $out('  term_callid               ' . ($termCallId !== '' ? $termCallId : '(empty)'));
+
+            if ($jobId === '') {
+                $out('');
+                $out('Without a job id there is nothing to fetch: Call Intelligence was not enabled for');
+                $out('this call when the CDR was written. Reprocess after enabling it on the domain.');
+                break;
+            }
+
+            $out('');
+            $out('GET /domains/' . (string) $call['domain_name'] . '/transcriptions?id=' . $jobId . '&date=' . $date . '&orig_callid=…&term_callid=…');
+
+            try {
+                $payload = $ns->transcription((string) $call['domain_name'], $jobId, $date, $origCallId, $termCallId);
+            } catch (NsException $e) {
+                $out('  FAILED — ' . $e->getMessage() . ' (HTTP ' . $e->status . ')');
+                $body = trim((string) preg_replace('/\s+/', ' ', (string) $e->responseBody));
+                $out('  body: ' . ($body !== '' ? substr($body, 0, 400) : '(empty)'));
+                $out('');
+                $out('  404 here means NetSapiens has no transcription row for that job/date/call id yet;');
+                $out('  400 means the identifiers were rejected; 403 means the API key cannot read it.');
+                break;
+            }
+
+            $transcription = Transcription::fromApi($payload);
+
+            $out('  processing status  ' . ($transcription->status !== '' ? $transcription->status : '(not reported)'));
+            $out('  segments           ' . count($transcription->segments));
+            $out('  summary            ' . ($transcription->summary !== '' ? Str::limit($transcription->summary, 160) : '(empty)'));
+            $out('  topics             ' . ($transcription->topics !== [] ? implode(', ', $transcription->topics) : '(none)'));
+            $out('  sentiment          ' . $transcription->label . ' (+' . $transcription->positive . ' / =' . $transcription->neutral . ' / -' . $transcription->negative . ')');
+            $out('  transcript text    ' . strlen($transcription->text) . ' chars');
+
+            foreach (array_slice($transcription->segments, 0, 3) as $segment) {
+                $out('    [' . $segment['start'] . '] ' . $segment['speaker'] . ': ' . Str::limit($segment['comment'], 120));
+            }
+
+            if ($option('raw') !== null) {
+                $out('');
+                $out('  raw payload: ' . Str::limit((string) json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), 1500));
+            }
+
+            if ($option('apply') !== null) {
+                /** @var CallProcessor $processor */
+                $processor = $container->get(CallProcessor::class);
+                $result = $processor->process($callId, true);
+                $fresh = $callRepo->find($callId) ?? [];
+
+                $out('');
+                $out('  reprocessed: ' . $result);
+                $out('  has_transcript      ' . (int) ($fresh['has_transcript'] ?? 0));
+                $out('  transcript_status   ' . (string) ($fresh['transcript_status'] ?? ''));
+                $out('  matches             ' . (int) ($fresh['match_count'] ?? 0));
+                $out('  last_error          ' . ((string) ($fresh['last_error'] ?? '') !== '' ? (string) $fresh['last_error'] : '—'));
+            }
+            break;
+
+        case 'calls:reprocess':
+            /** @var CallRepository $callRepo */
+            $callRepo = $container->get(CallRepository::class);
+            /** @var CallProcessor $processor */
+            $processor = $container->get(CallProcessor::class);
+
+            $ids = $callRepo->idsWithoutTranscript($number('limit', 50, 1, 500));
+
+            if ($ids === []) {
+                $out('Every call that has a Call Intelligence job already has its transcript.');
+                break;
+            }
+
+            $out(count($ids) . ' call(s) have a job id but no stored transcript. Reprocessing…');
+
+            $fixed = 0;
+            foreach ($ids as $id) {
+                $result = $processor->process($id, true);
+                $row = $callRepo->find($id) ?? [];
+                $has = (int) ($row['has_transcript'] ?? 0) === 1;
+
+                if ($has) {
+                    $fixed++;
+                }
+
+                $out(sprintf(
+                    '  #%-6d %-8s transcript %s%s',
+                    $id,
+                    $result,
+                    $has ? 'stored' : 'still missing',
+                    (string) ($row['last_error'] ?? '') !== '' ? '  (' . Str::limit((string) $row['last_error'], 80) . ')' : '',
+                ));
+            }
+
+            $out(sprintf('%d of %d transcript(s) recovered.', $fixed, count($ids)));
             break;
 
         case 'subscription:create':

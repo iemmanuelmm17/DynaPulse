@@ -21,6 +21,7 @@ use DynaPulse\Http\Response;
 use DynaPulse\Http\View;
 use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsGateway;
+use DynaPulse\NetSapiens\Transcription;
 use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
 use DynaPulse\Repository\KeywordRepository;
@@ -361,6 +362,108 @@ test('Ingestion → processing → alert queue end to end', function () use ($co
     $database = $container->get(\DynaPulse\Database\Database::class);
     $counts = $database->first('SELECT COUNT(*) AS total FROM calls WHERE domain_id = :d', ['d' => $domainId]);
     assertSame(1, (int) ($counts['total'] ?? 0), 'duplicate CDRs must merge on the call id');
+});
+
+/* ------------------------------------------------------------------------- */
+/* Call Intelligence (real NetSapiens payloads)                              */
+/* ------------------------------------------------------------------------- */
+
+/** The transcription payload NetSapiens returns for a finished job. */
+$transcriptionSample = static fn (): array => [
+    'call-intelligence-job-id' => 896968254,
+    'call-intelligence-processing-status' => 'finished',
+    'created-datetime' => '2026-11-16T15:31:45+00:00',
+    'call-id' => '0_4121119925@172.16.10.205',
+    'call-intelligence-features-enabled' => 'transcription,sentiment,summary,topics',
+    'call-intelligence-summary' => 'Hello. No 1 is available to take your call at this time. Please leave a message. Thank you.',
+    'call-intelligence-topics-top' => ['phone call', 'voicemail'],
+    'call-intelligence-duration-seconds' => 10.39,
+    'call-intelligence-percent-negative' => 100,
+    'call-intelligence-percent-neutral' => 0,
+    'call-intelligence-percent-positive' => 0,
+    'call-intelligence-segments' => [
+        [
+            'speaker' => 'sip:14086988652@66.85.57.10',
+            'comment' => 'Hello. No 1 is available to take your call at this time. Please leave a message. Thank you. To dial another extension, press 1.',
+            'sentiment' => 'Negative',
+            'start-time' => '00:00:00,24',
+            'end-time' => '00:00:10,63',
+        ],
+    ],
+    'call-intelligence-summary-status' => 'success',
+    'call-intelligence-topics-all' => ['phone call', 'voicemail'],
+    'errors' => null,
+    'last-modified-datetime' => '2026-11-16T15:31:58+00:00',
+];
+
+test('Transcription::fromApi reads a real Call Intelligence payload', function () use ($transcriptionSample): void {
+    $transcription = Transcription::fromApi($transcriptionSample());
+
+    assertSame('finished', $transcription->status);
+    assertSame(1, count($transcription->segments), 'one segment');
+    assertSame(['phone call', 'voicemail'], $transcription->topics);
+    assertContains('available to take your call', $transcription->text);
+    assertContains('available to take your call', $transcription->summary);
+    assertSame(0, $transcription->positive);
+    assertSame(100, $transcription->negative);
+    assertSame('negative', $transcription->label);
+    assertContains('00:00:00,24', $transcription->transcriptForExport());
+
+    $columns = $transcription->toColumns();
+    assertSame(1, $columns['has_transcript']);
+    assertSame('finished', $columns['transcript_status']);
+    assertContains('voicemail', (string) $columns['transcript_topics']);
+    assertContains('To dial another extension', (string) $columns['transcript_text']);
+});
+
+test('The transcript lookup uses the CDR orig/term call ids', function () use ($container, $fakeNs, $transcriptionSample): void {
+    /** @var DomainRepository $domains */
+    $domains = $container->get(DomainRepository::class);
+    $domains->ensure('trans.test', 'Trans', 'UTC');
+
+    $origCallId = '768181475@172.16.10.228';
+    $termCallId = '20261116153414064248-cac18a7984653a998c54034ec629e12c';
+
+    $fakeNs->transcriptionFixtures['trans.test:112174179'] = $transcriptionSample();
+
+    $cdr = [
+        'call-orig-call-id' => $origCallId,
+        'call-term-call-id' => $termCallId,
+        'call-orig-from-user' => 1003,
+        'call-orig-caller-id' => 8773962546,
+        'call-orig-to-user' => 83838,
+        'call-term-user' => 6001,
+        'call-orig-domain' => 'trans.test',
+        'call-term-domain' => 'trans.test',
+        'call-direction' => 3,
+        'call-start-datetime' => '2026-11-16T15:34:14+00:00',
+        'call-answer-datetime' => '2026-11-16T15:34:16+00:00',
+        'call-disconnect-datetime' => '2026-11-16T15:34:23+00:00',
+        'call-total-duration-seconds' => 7,
+        'call-talking-duration-seconds' => 7,
+        'call-intelligence-job-id' => 112174179,
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('trans.test', $cdr, true);
+
+    $queries = $fakeNs->transcriptionQueries;
+    $last = end($queries);
+    assertTrue(is_array($last), 'the transcription endpoint was called');
+    assertSame($origCallId, $last['orig'], 'orig call id is sent');
+    assertSame($termCallId, $last['term'], 'term call id is sent');
+    assertSame('202611', $last['date'], 'date is YYYYMM of the call');
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $row = $calls->find((int) $result['call_id']);
+    assertTrue($row !== null, 'call stored');
+    assertSame(1, (int) $row['has_transcript'], 'transcript stored');
+    assertSame('finished', (string) $row['transcript_status']);
+    assertTrue(in_array('voicemail', (array) $row['transcript_topics'], true), 'topics stored');
+    assertSame('negative', (string) $row['sentiment_label']);
+    assertContains('To dial another extension', (string) $row['transcript_text']);
 });
 
 /* ------------------------------------------------------------------------- */

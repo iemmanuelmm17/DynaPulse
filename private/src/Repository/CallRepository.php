@@ -212,6 +212,29 @@ final class CallRepository
     }
 
     /** @param array<string, mixed> $filters */
+    /**
+     * Calls that carry a Call Intelligence job id but never got their transcript
+     * stored (wrong identifiers, API hiccup, interrupted run). Used by
+     * `console.php calls:reprocess`.
+     *
+     * @return list<int>
+     */
+    public function idsWithoutTranscript(int $limit = 50): array
+    {
+        $limit = max(1, min(500, $limit));
+
+        $rows = $this->db->select(
+            "SELECT id FROM calls
+             WHERE has_transcript = 0
+               AND transcript_job_id <> ''
+               AND transcript_status IN ('pending', 'unavailable', 'error')
+             ORDER BY COALESCE(started_at, created_at) DESC
+             LIMIT " . $limit,
+        );
+
+        return array_map(static fn (array $row): int => (int) $row['id'], $rows);
+    }
+
     /** Newest started_at in the table, or null when nothing was ever ingested. */
     public function latestStartedAt(): ?string
     {

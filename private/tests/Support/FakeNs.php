@@ -52,9 +52,24 @@ final class FakeNs implements NsGateway
         return array_slice($this->cdrFixtures[$domain] ?? [], $start, $limit);
     }
 
-    public function transcription(string $domain, string $jobId, string $yearMonth, string $callId): array
-    {
+    /** @var list<array<string, string>> Every transcription query the code asked for. */
+    public array $transcriptionQueries = [];
+
+    public function transcription(
+        string $domain,
+        string $jobId,
+        string $yearMonth,
+        string $origCallId = '',
+        string $termCallId = '',
+    ): array {
         $this->transcriptionCalls++;
+        $this->transcriptionQueries[] = [
+            'domain' => $domain,
+            'job' => $jobId,
+            'date' => $yearMonth,
+            'orig' => $origCallId,
+            'term' => $termCallId,
+        ];
 
         $key = $domain . ':' . $jobId;
         if (!isset($this->transcriptionFixtures[$key])) {

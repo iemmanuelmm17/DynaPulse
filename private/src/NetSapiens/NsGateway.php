@@ -18,8 +18,20 @@ interface NsGateway
      */
     public function cdrs(string $domain, string $startIso, string $endIso, int $limit = 500, int $start = 0): array;
 
-    /** @return array<string, mixed> */
-    public function transcription(string $domain, string $jobId, string $yearMonth, string $callId): array;
+    /**
+     * Call Intelligence. NetSapiens identifies the row by the CDR's orig/term
+     * call ids (see the CDR field "prefilled-transcription-api"); $origCallId and
+     * $termCallId are therefore preferred over a bare $callId.
+     *
+     * @return array<string, mixed>
+     */
+    public function transcription(
+        string $domain,
+        string $jobId,
+        string $yearMonth,
+        string $origCallId = '',
+        string $termCallId = '',
+    ): array;
 
     /** @return array<string, mixed>|null */
     public function recording(string $domain, string $callId): ?array;

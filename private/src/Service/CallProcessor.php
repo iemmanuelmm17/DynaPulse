@@ -73,11 +73,20 @@ final class CallProcessor
 
         if (!$hasTranscript && $jobId !== '') {
             try {
-                $payload = $this->ns->transcription(
+                $origCallId = trim((string) ($call['orig_call_id'] ?? ''));
+                $termCallId = trim((string) ($call['term_call_id'] ?? ''));
+
+                if ($origCallId === '' && $termCallId === '') {
+                    $origCallId = (string) ($call['call_id'] ?? '');
+                }
+
+                $payload = $this->fetchTranscription(
                     (string) $domain['domain'],
                     $jobId,
-                    Time::yearMonth($call['started_at'], $timezone),
-                    (string) ($call['orig_call_id'] ?: $call['call_id']),
+                    isset($call['started_at']) ? (string) $call['started_at'] : null,
+                    $timezone,
+                    $origCallId,
+                    $termCallId,
                 );
 
                 $transcription = Transcription::fromApi($payload);
@@ -177,6 +186,36 @@ final class CallProcessor
         ]);
 
         return 'complete';
+    }
+
+    /**
+     * NetSapiens files Call Intelligence by job id + YYYYMM + call ids. A call
+     * that starts just after local midnight can belong to the previous month in
+     * the domain timezone and to the current one in UTC, so both are tried.
+     *
+     * @return array<string, mixed>
+     */
+    private function fetchTranscription(
+        string $domainName,
+        string $jobId,
+        ?string $startedAt,
+        string $timezone,
+        string $origCallId,
+        string $termCallId,
+    ): array {
+        $month = Time::yearMonth($startedAt, $timezone);
+
+        try {
+            return $this->ns->transcription($domainName, $jobId, $month, $origCallId, $termCallId);
+        } catch (NsException $e) {
+            $utcMonth = Time::yearMonth($startedAt, 'UTC');
+
+            if ($e->isNotFound() && $utcMonth !== $month) {
+                return $this->ns->transcription($domainName, $jobId, $utcMonth, $origCallId, $termCallId);
+            }
+
+            throw $e;
+        }
     }
 
     /** @return array{processed:int, retry:int, failed:int, skipped:int} */
