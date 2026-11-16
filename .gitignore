@@ -11,6 +11,7 @@ private/storage/*
 !private/storage/sessions/.gitkeep
 !private/storage/db/.gitkeep
 !private/storage/tmp/.gitkeep
+!private/storage/cache/.gitkeep
 !private/storage/recordings/.gitkeep
 private/storage/recordings/*
 !private/storage/recordings/.gitkeep

@@ -28,9 +28,15 @@ $candidates[] = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'private' . DIRECTORY_S
 
 $privatePath = null;
 foreach ($candidates as $candidate) {
-    if (is_file($candidate . DIRECTORY_SEPARATOR . 'bootstrap.php')) {
-        $privatePath = realpath($candidate);
-        break;
+    $candidate = rtrim((string) $candidate, '/\\');
+
+    // Accept both the app folder itself and a repository root that contains
+    // bootstrap.php inside its own /private subfolder.
+    foreach ([$candidate, $candidate . DIRECTORY_SEPARATOR . 'private'] as $probe) {
+        if (is_file($probe . DIRECTORY_SEPARATOR . 'bootstrap.php')) {
+            $privatePath = realpath($probe);
+            break 2;
+        }
     }
 }
 
