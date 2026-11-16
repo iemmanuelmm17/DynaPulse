@@ -184,7 +184,6 @@ final class AudioController extends BaseController
         $ok = curl_exec($handle);
         $error = $ok === false ? curl_error($handle) : null;
         $finalStatus = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-        curl_close($handle);
 
         if ($tempFile !== null) {
             fclose($tempFile);

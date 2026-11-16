@@ -277,6 +277,57 @@ php private/bin/console.php prune</pre>
             </div>
 
             <div class="hr"></div>
+            <div class="label" style="margin-bottom:8px;">Ingestion</div>
+            <p class="hint" style="margin:0 0 10px;">
+                Newest call in the database:
+                <strong><?= e((string) ($ingestion['latest_call'] ?? '') !== '' ? tz_date((string) $ingestion['latest_call'], 'M j, Y g:i A') : 'none yet') ?></strong>.
+                Calls arrive through the NetSapiens <em>cdr</em> subscription or the scheduled poller — with
+                neither running this list stays empty even when calls exist in NetSapiens.
+            </p>
+
+            <?php if (($ingestion['domains'] ?? []) === []): ?>
+                <p class="hint">
+                    No domains yet — import them under <a href="<?= e(path_url('domains')) ?>">Domains</a>
+                    (“Sync from NetSapiens”), then run the poller; without a domain there is nothing to query.
+                </p>
+            <?php else: ?>
+                <div class="table-wrap">
+                    <table class="table">
+                        <thead>
+                        <tr><th>Domain</th><th>Polling</th><th class="right">Calls</th><th>Last poll</th><th>Last error</th></tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($ingestion['domains'] as $domain): ?>
+                            <tr>
+                                <td class="strong"><?= e((string) $domain['domain']) ?></td>
+                                <td>
+                                    <?php if ((int) ($domain['enabled'] ?? 0) !== 1): ?>
+                                        <span class="badge badge--warning">disabled</span>
+                                    <?php elseif ((int) ($domain['poll_enabled'] ?? 0) !== 1): ?>
+                                        <span class="badge badge--warning">polling off</span>
+                                    <?php else: ?>
+                                        <span class="badge badge--success">on</span>
+                                    <?php endif; ?>
+                                </td>
+                                <td class="right"><?= number_format((int) ($domain['call_count'] ?? 0)) ?></td>
+                                <td class="nowrap muted"><?= e(((string) ($domain['last_polled_at'] ?? '')) !== '' ? tz_date((string) $domain['last_polled_at'], 'M j, g:i A') : 'never') ?></td>
+                                <td class="muted"><?= e(((string) ($domain['last_poll_error'] ?? '')) !== '' ? (string) $domain['last_poll_error'] : '—') ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                </div>
+            <?php endif; ?>
+
+            <p class="hint" style="margin-top:10px;">
+                Catch up from a Command Prompt, in this order:
+                <code>php bin\console.php ns:test</code> &rarr;
+                <code>php bin\console.php domains:sync</code> &rarr;
+                <code>php bin\console.php poll 72</code> &rarr;
+                <code>php bin\console.php process</code>.
+            </p>
+
+            <div class="hr"></div>
             <details class="panel" style="border:0;background:transparent;">
                 <summary style="padding-left:0;"><?= icon('file') ?> Latest log entries — <?= e((string) $env['log_file']) ?></summary>
                 <div class="panel__body" style="padding-left:0;">

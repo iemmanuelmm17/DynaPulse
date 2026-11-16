@@ -267,8 +267,10 @@ absolute PHP binary path, e.g.
 "C:\Program Files\PHP\php.exe" D:\private\DynaPulse\bin\console.php process
 ```
 
-Useful diagnostics: `console.php status` (counters), `console.php test-mail --to=you@example.com`,
-`console.php migrate`, `console.php help`.
+Useful diagnostics: `console.php status` (counters plus per-domain last poll / last error),
+`console.php ns:test` (checks the API key, the domain list and a real CDR query),
+`console.php domains:sync` (import the domains the API key can see),
+`console.php test-mail --to=you@example.com`, `console.php migrate`, `console.php help`.
 
 ## How alerting works
 
@@ -349,6 +351,10 @@ php bin\console.php process --limit=10 --budget=45
 | Alerts show “Email not configured” | `MAIL_*` values missing in `.env`; the portal logs `alert.blocked`. |
 | Calls appear but no transcripts | Call Intelligence not enabled for that domain/user, or the job is still processing — watch the retry counter on the call page. |
 | Recording button 404s | No recording on file in NetSapiens (recording disabled for that user), or the media URL expired before download. |
+| **No calls at all** (dashboard and Calls list empty) | Nothing has been ingested yet. Run `php bin\console.php ns:test` — it tells you whether the API key works, which domains are configured and whether `/domains/{domain}/cdrs` returns rows. Then `php bin\console.php domains:sync` and `php bin\console.php poll 72`. Without the webhook or a scheduled `poll`, no CDR ever reaches the portal. The same information is on *Settings → Environment health → Ingestion*. |
+| `ns:test` says 0 CDR rows for a domain | The window is empty, the domain name does not match NetSapiens exactly, or the API key cannot read CDRs for that domain (HTTP 403). Try `--hours=168` and check the domain name in NetSapiens. |
+| `ns:test` says HTTP 401/403 on `/domains` | `NS_API_KEY` is wrong or expired, or the key is scoped to a different domain. |
+| Calls exist but the list is empty | The list defaults to the last 30 days (`dashboard_days`); widen the date range on the Calls page. |
 | Webhook returns 403 | `WEBHOOK_SECRET` in the URL does not match `.env`, or the subscription id differs from `WEBHOOK_SUBSCRIPTION_ID`. |
 | Domain missing after switching | Run *Sync from NetSapiens* under Administration → Domains. |
 

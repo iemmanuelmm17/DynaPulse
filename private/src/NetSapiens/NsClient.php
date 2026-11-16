@@ -239,7 +239,6 @@ final class NsClient implements NsGateway
         $raw = curl_exec($handle);
         $error = $raw === false ? (curl_error($handle) ?: 'unknown cURL error') : null;
         $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
-        curl_close($handle);
 
         Logger::debug('netsapiens.request', [
             'method' => $method,

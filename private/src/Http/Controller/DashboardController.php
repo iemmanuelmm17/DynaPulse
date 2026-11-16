@@ -80,6 +80,7 @@ final class DashboardController extends BaseController
             'topTopics' => $this->calls->topTopics($filters, 10),
             'recentAlerts' => $this->matches->query($filters, 6, 0)['rows'],
             'recentCalls' => $this->calls->query($filters, 6, 0)['rows'],
+            'latestCallAt' => $this->calls->latestStartedAt(),
             'pendingCalls' => $this->calls->pendingCount(),
             'notificationsFailed' => $this->notifications->failedCount(7),
             'notificationsSent' => $this->notifications->sentCount(30),

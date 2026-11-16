@@ -21,6 +21,9 @@ final class FakeNs implements NsGateway
     /** @var list<array<string, mixed>> */
     public array $subscriptionFixtures = [];
 
+    /** Throw this from domains() to simulate an API failure. */
+    public ?\DynaPulse\NetSapiens\NsException $domainsError = null;
+
     public int $transcriptionCalls = 0;
 
     /** @return array<string, mixed> */
@@ -95,6 +98,10 @@ final class FakeNs implements NsGateway
 
     public function domains(int $limit = 200): array
     {
+        if ($this->domainsError !== null) {
+            throw $this->domainsError;
+        }
+
         return array_map(
             static fn (string $domain): array => ['domain' => $domain, 'description' => $domain],
             array_keys($this->cdrFixtures),

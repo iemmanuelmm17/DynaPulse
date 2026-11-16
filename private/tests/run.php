@@ -30,6 +30,7 @@ use DynaPulse\Repository\RecipientRepository;
 use DynaPulse\Service\CallProcessor;
 use DynaPulse\Service\IngestService;
 use DynaPulse\Service\KeywordMatcher;
+use DynaPulse\Service\NsDiagnostics;
 use DynaPulse\Service\Signer;
 use DynaPulse\Service\XlsxWriter;
 use DynaPulse\Support\Config;
@@ -360,6 +361,68 @@ test('Ingestion → processing → alert queue end to end', function () use ($co
     $database = $container->get(\DynaPulse\Database\Database::class);
     $counts = $database->first('SELECT COUNT(*) AS total FROM calls WHERE domain_id = :d', ['d' => $domainId]);
     assertSame(1, (int) ($counts['total'] ?? 0), 'duplicate CDRs must merge on the call id');
+});
+
+/* ------------------------------------------------------------------------- */
+/* NetSapiens diagnostics ("why are there no calls?")                        */
+/* ------------------------------------------------------------------------- */
+
+test('NsDiagnostics reports what NetSapiens returns per domain', function () use ($container, $config, $fakeNs): void {
+    $domains = $container->get(DomainRepository::class);
+    $domains->ensure('diag.test', 'Diag', 'UTC');
+    $domains->ensure('quiet.test', 'Quiet', 'UTC');
+
+    $fakeNs->cdrFixtures['diag.test'] = [[
+        'call-orig-call-id' => 'diag-1',
+        'call-orig-from-user' => '4155550100',
+        'call-orig-to-user' => '8005550100',
+        'call-start-datetime' => gmdate('Y-m-d\TH:i:s\Z', time() - 600),
+        'call-total-duration-seconds' => 42,
+    ]];
+
+    $config->set('ns.base_url', 'https://ns.example.test');
+    $config->set('ns.api_key', 'abcdef0123456789');
+    $config->set('ns.client_id', 'client');
+    $config->set('ns.client_secret', 'secret');
+
+    $report = (new NsDiagnostics($fakeNs, $domains, $config))->run(24);
+
+    $text = implode("\n", $report['lines']);
+    assertContains('GET /domains', $text);
+    assertContains('diag.test', $text);
+    assertContains('1 CDR row(s) returned', $text);
+    assertContains('sample CDR', $text);
+    // The key itself must never be printed in full.
+    assertTrue(!str_contains($text, 'abcdef0123456789'), 'the API key must be masked');
+    assertTrue(str_contains($text, '********6789'), 'only the last 4 chars are shown');
+
+    // quiet.test has no fixtures: its window is empty, so the report must say so.
+    assertContains('0 CDR row(s) returned', $text);
+    assertTrue(!$report['ok'], 'a domain without CDRs is not a green result');
+});
+
+test('NsDiagnostics explains a rejected key', function () use ($container, $config): void {
+    $domains = $container->get(DomainRepository::class);
+    $config->set('ns.base_url', 'https://ns.example.test');
+    $config->set('ns.api_key', 'bad-key');
+
+    $ns = new FakeNs();
+    $ns->domainsError = new \DynaPulse\NetSapiens\NsException('NetSapiens rejected the API credentials (HTTP 401).', 401, '{"message":"Unauthorized"}');
+
+    $report = (new NsDiagnostics($ns, $domains, $config))->run(24);
+    $text = implode("\n", $report['lines']);
+
+    assertTrue(!$report['ok'], 'a 401 must fail the diagnostic');
+    assertContains('HTTP 401', $text);
+    assertContains('Unauthorized', $text);
+    assertContains('key was rejected', $text);
+
+    // Missing configuration short-circuits before any HTTP call.
+    $config->set('ns.base_url', '');
+    $config->set('ns.api_key', '');
+    $report = (new NsDiagnostics($ns, $domains, $config))->run(24);
+    assertTrue(!$report['ok'], 'nothing configured means nothing can be pulled');
+    assertContains('NS_BASE_URL and NS_API_KEY must be set', implode("\n", $report['lines']));
 });
 
 /* ------------------------------------------------------------------------- */

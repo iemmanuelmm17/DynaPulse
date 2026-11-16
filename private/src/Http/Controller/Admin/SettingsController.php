@@ -14,6 +14,7 @@ use DynaPulse\Mail\Mailer;
 use DynaPulse\NetSapiens\NsException;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\Repository\AuditRepository;
+use DynaPulse\Repository\CallRepository;
 use DynaPulse\Repository\DomainRepository;
 use DynaPulse\Repository\SettingsRepository;
 use DynaPulse\Support\Config;
@@ -27,6 +28,7 @@ final class SettingsController extends BaseController
         View $view,
         private SettingsRepository $settings,
         private DomainRepository $domains,
+        private CallRepository $calls,
         private Mailer $mailer,
         private NsGateway $ns,
         private AuditRepository $audit,
@@ -108,6 +110,10 @@ final class SettingsController extends BaseController
                 'count' => count($subscriptions),
             ],
             'domains' => $this->domains->all(true),
+            'ingestion' => [
+                'latest_call' => $this->calls->latestStartedAt(),
+                'domains' => $this->domains->all(),
+            ],
             'checks' => $checks,
             'appVersion' => '1.0.0',
             'timezone' => (string) $this->config->get('app.timezone'),

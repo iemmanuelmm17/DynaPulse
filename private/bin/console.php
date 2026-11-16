@@ -7,6 +7,8 @@ declare(strict_types=1);
  *
  *   php private/bin/console.php migrate
  *   php private/bin/console.php key:generate [--force]
+ *   php private/bin/console.php ns:test [--domain=acme.com] [--hours=24]
+ *   php private/bin/console.php domains:sync
  *   php private/bin/console.php poll [hours]
  *   php private/bin/console.php process [--limit=25] [--budget=50]
  *   php private/bin/console.php notify [--limit=20]
@@ -26,13 +28,16 @@ use DynaPulse\Http\Container;
 use DynaPulse\Http\Context;
 use DynaPulse\Mail\MailException;
 use DynaPulse\Mail\Mailer;
+use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsException;
 use DynaPulse\NetSapiens\NsGateway;
 use DynaPulse\Repository\CallRepository;
+use DynaPulse\Repository\DomainRepository;
 use DynaPulse\Repository\SettingsRepository;
 use DynaPulse\Service\CallProcessor;
 use DynaPulse\Service\IngestService;
 use DynaPulse\Service\NotificationSender;
+use DynaPulse\Service\NsDiagnostics;
 use DynaPulse\Service\ReportService;
 use DynaPulse\Support\Config;
 use DynaPulse\Support\Logger;
@@ -113,6 +118,8 @@ try {
             $out('  migrate                       apply pending database migrations');
             $out('  key:generate [--force]        write a random APP_KEY into .env');
             $out('  poll [hours]                  pull recent CDRs for every pollable domain');
+            $out('  ns:test [--domain] [--hours]  check NetSapiens credentials and CDR access');
+            $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
             $out('  notify [--limit]              send queued alert emails');
             $out('  reports:run                   send report schedules that are due');
@@ -269,6 +276,71 @@ try {
             $out(sprintf('  retention          %s days', $settings->get('retention_days')));
             $out(sprintf('  alerts enabled     %s', $settings->bool('alerts_enabled') ? 'yes' : 'no'));
             $out(sprintf('  mail configured    %s', $container->get(Mailer::class)->configured() ? 'yes' : 'no'));
+            $out(sprintf('  latest call        %s', (string) ($db->first('SELECT MAX(started_at) AS latest FROM calls')['latest'] ?? '') ?: 'never'));
+
+            $out('');
+            $out('  domains:');
+            $rows = $container->get(DomainRepository::class)->all();
+
+            if ($rows === []) {
+                $out('    (none configured — import them with: php bin/console.php domains:sync)');
+            }
+
+            foreach ($rows as $row) {
+                $out(sprintf(
+                    '    %-30s %-9s poll %-4s calls %-5d last poll %s%s',
+                    (string) $row['domain'],
+                    (int) ($row['enabled'] ?? 0) === 1 ? 'enabled' : 'disabled',
+                    (int) ($row['poll_enabled'] ?? 0) === 1 ? 'on' : 'off',
+                    (int) ($row['call_count'] ?? 0),
+                    (string) ($row['last_polled_at'] ?? '') !== '' ? (string) $row['last_polled_at'] : 'never',
+                    (string) ($row['last_poll_error'] ?? '') !== '' ? PHP_EOL . '        error: ' . (string) $row['last_poll_error'] : '',
+                ));
+            }
+            break;
+
+        case 'ns:test':
+        case 'api:test':
+            /** @var NsDiagnostics $diagnostics */
+            $diagnostics = $container->get(NsDiagnostics::class);
+            $probeDomain = (string) ($option('domain') ?? '');
+            $report = $diagnostics->run($number('hours', 24, 1, 720), $probeDomain !== '' ? $probeDomain : null);
+
+            foreach ($report['lines'] as $line) {
+                $out((string) $line);
+            }
+
+            if (!$report['ok']) {
+                exit(1);
+            }
+            break;
+
+        case 'domains:sync':
+            /** @var NsGateway $ns */
+            $ns = $container->get(NsGateway::class);
+            /** @var DomainRepository $domainRepo */
+            $domainRepo = $container->get(DomainRepository::class);
+
+            $remote = $ns->domains(200);
+            $added = [];
+
+            foreach ($remote as $row) {
+                $name = trim((string) ($row['domain'] ?? ''));
+                if ($name === '' || $domainRepo->findByDomain($name) !== null) {
+                    continue;
+                }
+
+                $domainRepo->ensure($name, (string) ($row['description'] ?? $name), (string) $config->get('app.timezone', 'UTC'));
+                $added[] = $name;
+            }
+
+            $out(sprintf('%d domain(s) visible to the API key, %d imported.', count($remote), count($added)));
+            foreach ($added as $name) {
+                $out('  + ' . $name);
+            }
+            if ($added === []) {
+                $out('  Nothing new — toggle the domains you monitor under Administration → Domains.');
+            }
             break;
 
         case 'subscription:create':

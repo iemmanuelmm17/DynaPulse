@@ -190,8 +190,26 @@ $donutSegments = [
             <?php if ($recentCalls === []): ?>
                 <div class="empty">
                     <div class="empty__icon"><?= icon('phone') ?></div>
-                    <h3>No calls in this period</h3>
-                    <p>DynaPulse ingests CDRs from the NetSapiens event subscription and the scheduled poller.</p>
+                    <?php if (($latestCallAt ?? null) === null): ?>
+                        <h3>No calls have been ingested yet</h3>
+                        <p>
+                            DynaPulse only sees calls that the NetSapiens <em>cdr</em> subscription posts, or that the
+                            poller pulls. Import the domains, then run
+                            <code>php bin\console.php poll 72</code> — or create the subscription.
+                        </p>
+                        <?php if (\DynaPulse\Http\Context::can('manage')): ?>
+                            <div class="row" style="justify-content:center;margin-top:14px;">
+                                <a class="btn btn--ghost btn--sm" href="<?= e(path_url('domains')) ?>">Domains</a>
+                                <a class="btn btn--ghost btn--sm" href="<?= e(path_url('settings')) ?>#environment">Ingestion status</a>
+                            </div>
+                        <?php endif; ?>
+                    <?php else: ?>
+                        <h3>No calls in this period</h3>
+                        <p>
+                            The newest call is from <?= e(tz_date((string) $latestCallAt, 'M j, Y g:i A')) ?> —
+                            widen the date range to see older calls.
+                        </p>
+                    <?php endif; ?>
                 </div>
             <?php else: ?>
                 <div class="table-wrap">

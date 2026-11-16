@@ -212,6 +212,14 @@ final class CallRepository
     }
 
     /** @param array<string, mixed> $filters */
+    /** Newest started_at in the table, or null when nothing was ever ingested. */
+    public function latestStartedAt(): ?string
+    {
+        $value = $this->db->scalar('SELECT MAX(started_at) FROM calls');
+
+        return is_string($value) && $value !== '' ? $value : null;
+    }
+
     public function stats(array $filters): array
     {
         [$where, $params] = $this->filterSql($filters);
