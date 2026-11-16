@@ -255,17 +255,28 @@ Point Windows Task Scheduler at these commands. All are idempotent and safe to o
 | Command | Suggested cadence | What it does |
 |---|---|---|
 | `php bin\console.php poll` | every 5 minutes | Pulls recent CDRs per pollable domain (safety net). |
-| `php bin\console.php process` | every 5 minutes | Drains the processing queue (transcript, recording, matching). |
+| `php bin\console.php process` | every 5 minutes | Drains the processing queue (transcript, recording, matching). `process --call=ID` forces one call and prints the outcome. |
 | `php bin\console.php notify` | every minute | Sends queued alert emails not already sent inline. |
 | `php bin\console.php reports:run` | every 15 minutes | Sends report schedules that are due. |
 | `php bin\console.php prune` | nightly | Deletes records older than the retention window. |
 
-Create the task with **Start in** set to `D:\private\DynaPulse` so relative paths resolve, or use the
-absolute PHP binary path, e.g.
+Create them from an elevated prompt with absolute paths (this is the XAMPP layout used in the
+screenshots of this guide — adjust the two paths if yours differ):
 
 ```bat
-"C:\Program Files\PHP\php.exe" D:\private\DynaPulse\bin\console.php process
+schtasks /Create /TN "DynaPulse poll"    /SC MINUTE /MO 5 /F ^
+  /TR "\"C:\xampp\php\php.exe\" \"D:\private\dynapulse\bin\console.php\" poll"
+
+schtasks /Create /TN "DynaPulse process" /SC MINUTE /MO 5 /F ^
+  /TR "\"C:\xampp\php\php.exe\" \"D:\private\dynapulse\bin\console.php\" process"
+
+schtasks /Create /TN "DynaPulse notify"  /SC MINUTE /MO 1 /F ^
+  /TR "\"C:\xampp\php\php.exe\" \"D:\private\dynapulse\bin\console.php\" notify"
 ```
+
+Check them with `schtasks /Query /TN "DynaPulse process" /V /FO LIST` and run one by hand with
+`schtasks /Run /TN "DynaPulse process"`. Without these, calls stay at **status pending · attempt 0**
+forever: the web UI never processes anything by itself.
 
 Useful diagnostics: `console.php status` (counters plus per-domain last poll / last error),
 `console.php ns:test` (checks the API key, the domain list, a real CDR query with `raw=yes` and the

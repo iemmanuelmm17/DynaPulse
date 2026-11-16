@@ -13,7 +13,7 @@ declare(strict_types=1);
  *   php private/bin/console.php calls:audit [--limit=500] [--show=3]
  *   php private/bin/console.php domains:sync
  *   php private/bin/console.php poll [hours]
- *   php private/bin/console.php process [--limit=25] [--budget=50]
+ *   php private/bin/console.php process [--limit=25] [--budget=50] [--call=ID]
  *   php private/bin/console.php notify [--limit=20]
  *   php private/bin/console.php reports:run
  *   php private/bin/console.php prune
@@ -197,6 +197,7 @@ try {
             $out('  calls:audit [--limit] [--show] which identifiers the stored CDRs actually carry');
             $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
+            $out('                                add --call=ID to process one call and print the outcome');
             $out('  notify [--limit]              send queued alert emails');
             $out('  reports:run                   send report schedules that are due');
             $out('  prune                         delete records older than the retention window');
@@ -263,6 +264,44 @@ try {
         case 'process':
             /** @var CallProcessor $processor */
             $processor = $container->get(CallProcessor::class);
+
+            $single = $option('call');
+
+            if ($single !== null && is_numeric($single)) {
+                /** @var CallRepository $singleCalls */
+                $singleCalls = $container->get(CallRepository::class);
+                $id = (int) $single;
+                $before = $singleCalls->find($id);
+
+                if ($before === null) {
+                    $fail('No call with id ' . $id . ' in the database.');
+                }
+
+                $out('Call #' . $id . ' — ' . (string) ($before['domain_name'] ?? '')
+                    . ' · ' . (string) ($before['started_at'] ?? '')
+                    . ' · status ' . (string) ($before['status'] ?? '')
+                    . ' · ' . (int) ($before['attempts'] ?? 0) . ' attempt(s)');
+
+                if (dp_repair_identifiers($singleCalls, $id, $before)) {
+                    $out('  repaired the call ids / job id from the stored CDR');
+                }
+
+                $out('  processing…');
+                $result = $processor->process($id, true);
+                $row = $singleCalls->find($id) ?? [];
+
+                $out('');
+                $out('  result             ' . $result);
+                $out('  has_transcript     ' . (int) ($row['has_transcript'] ?? 0));
+                $out('  transcript_status  ' . (string) ($row['transcript_status'] ?? ''));
+                $out('  attempts           ' . (int) ($row['attempts'] ?? 0));
+                $out('  recording_status   ' . (string) ($row['recording_status'] ?? ''));
+                $out('  matches            ' . (int) ($row['match_count'] ?? 0));
+                $out('  last_error         ' . ((string) ($row['last_error'] ?? '') !== '' ? (string) $row['last_error'] : '(none)'));
+
+                break;
+            }
+
             $result = $processor->work($number('limit', 25, 1, 500), $number('budget', 50, 5, 300));
 
             $out(sprintf(
@@ -354,7 +393,20 @@ try {
             $out(sprintf('  retention          %s days', $settings->get('retention_days')));
             $out(sprintf('  alerts enabled     %s', $settings->bool('alerts_enabled') ? 'yes' : 'no'));
             $out(sprintf('  mail configured    %s', $container->get(Mailer::class)->configured() ? 'yes' : 'no'));
-            $out(sprintf('  latest call        %s', (string) ($db->first('SELECT MAX(started_at) AS latest FROM calls')['latest'] ?? '') ?: 'never'));
+            $out(sprintf('  latest call        %s', (string) (($db->first('SELECT MAX(started_at) AS latest FROM calls') ?? [])['latest'] ?? '') ?: 'never'));
+
+            $dueNow = $count("SELECT COUNT(*) FROM calls WHERE status IN ('pending', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= datetime('now'))");
+            $unavailable = $count("SELECT COUNT(*) FROM calls WHERE has_transcript = 0 AND transcript_status = 'unavailable'");
+            $lastProcessed = (string) (($db->first('SELECT MAX(processed_at) AS last FROM calls') ?? [])['last'] ?? '');
+            $out(sprintf('  queue              %d due now, last worker pass %s', $dueNow, $lastProcessed !== '' ? $lastProcessed : 'never'));
+
+            if ($unavailable > 0) {
+                $out(sprintf('    unavailable      %d call(s) whose CDR carried no Call Intelligence ids', $unavailable));
+            }
+
+            if ($dueNow > 0 && $lastProcessed === '') {
+                $out('    ! nothing has been processed yet — run: php bin/console.php process');
+            }
 
             $out('');
             $out('  domains:');

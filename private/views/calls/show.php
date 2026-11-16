@@ -118,7 +118,13 @@ $mailReady = (bool) Context::config('mail.host') && (bool) Context::config('mail
             <span class="banner__icon"><?= icon('clock') ?></span>
             <div>
                 <strong><?= e(ucfirst((string) $call['status'])) ?> · attempt <?= (int) $call['attempts'] ?></strong>
-                <?= e($call['last_error'] !== '' ? $call['last_error'] : 'Call Intelligence is still working on this call.') ?>
+                <?php if ((int) $call['attempts'] === 0 && (string) $call['status'] === 'pending'): ?>
+                    The background worker has not picked this call up yet. It runs every few minutes once
+                    the scheduled task from the README is in place, or immediately with
+                    <code>php bin\console.php process</code>.
+                <?php else: ?>
+                    <?= e($call['last_error'] !== '' ? $call['last_error'] : 'Call Intelligence is still working on this call.') ?>
+                <?php endif; ?>
             </div>
         </div>
     <?php endif; ?>
