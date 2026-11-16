@@ -50,14 +50,35 @@ final class NsClient implements NsGateway
 
     public function cdrs(string $domain, string $startIso, string $endIso, int $limit = 500, int $start = 0): array
     {
-        $result = $this->request('GET', '/domains/' . rawurlencode($domain) . '/cdrs', [
+        $path = '/domains/' . rawurlencode($domain) . '/cdrs';
+        $params = [
             'datetime-start' => $startIso,
             'datetime-end' => $endIso,
             'limit' => $limit,
             'start' => $start === 0 ? null : $start,
-        ]);
+            // The trimmed CDR view leaves out call-orig-call-id,
+            // call-term-call-id and prefilled-transcription-api; raw=yes returns
+            // them, and without them no transcript can be looked up.
+            'raw' => 'yes',
+        ];
 
-        return self::listOf($result);
+        try {
+            return self::listOf($this->request('GET', $path, $params));
+        } catch (NsException $e) {
+            if ($e->status !== 400) {
+                throw $e;
+            }
+
+            // Some builds reject the flag as an unknown parameter.
+            Logger::warning('netsapiens.raw_cdr_rejected', [
+                'domain' => $domain,
+                'body' => $e->responseBody,
+            ]);
+
+            unset($params['raw']);
+
+            return self::listOf($this->request('GET', $path, $params));
+        }
     }
 
     public function transcription(

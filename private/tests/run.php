@@ -527,6 +527,26 @@ test('prefilled-transcription-api wins over the stored ids (and fixes the domain
     assertTrue(in_array('voicemail', (array) $row['transcript_topics'], true), 'topics stored');
 });
 
+test('A raw=yes payload nested under cdr is flattened', function (): void {
+    $inner = [
+        'id' => '1794843254e84c773f1c3da1fcb12b893ea5da8237',
+        'call-orig-call-id' => '768181475@172.16.10.228',
+        'call-term-call-id' => '20261116153414064248-cac18a7984653a998c54034ec629e12c',
+        'call-start-datetime' => '2026-11-16T15:34:14+00:00',
+        'call-intelligence-job-id' => 112174179,
+    ];
+
+    $wrapped = CdrMapper::map(['cdr' => $inner], '1180.DynaCloud');
+    $direct = CdrMapper::map($inner, '1180.DynaCloud');
+
+    assertSame($direct['call_id'], $wrapped['call_id'], 'the nested CDR maps exactly like a flat one');
+    assertSame('768181475@172.16.10.228', $wrapped['orig_call_id']);
+    assertSame('112174179', (string) $wrapped['transcript_job_id']);
+
+    $stringWrapped = CdrMapper::map(['cdr' => json_encode($inner)], '1180.DynaCloud');
+    assertSame($direct['call_id'], $stringWrapped['call_id'], 'a JSON-string CDR is decoded too');
+});
+
 test('Call ids are recovered from the prefilled transcription link', function (): void {
     $cdr = [
         'id' => '1794843254e84c773f1c3da1fcb12b893ea5da8237',

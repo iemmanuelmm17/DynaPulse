@@ -22,6 +22,8 @@ final class CdrMapper
      */
     public static function map(array $cdr, string $domain): array
     {
+        $cdr = self::unwrap($cdr);
+
         $origCallId = self::text($cdr, ['call-orig-call-id', 'call-orig-callid', 'orig_callid', 'orig-callid']);
         $termCallId = self::text($cdr, ['call-term-call-id', 'call-term-callid', 'term_callid', 'term-callid']);
         $plainCallId = self::text($cdr, ['call-id', 'callid', 'id']);
@@ -204,5 +206,28 @@ final class CdrMapper
         }
 
         return '';
+    }
+
+    /**
+     * `raw=yes` may hand the original CDR back nested under "cdr" (sometimes as
+     * a JSON string); flatten it so the fields are read from the right place.
+     *
+     * @param array<string, mixed> $cdr
+     * @return array<string, mixed>
+     */
+    private static function unwrap(array $cdr): array
+    {
+        if (count($cdr) !== 1 || !array_key_exists('cdr', $cdr)) {
+            return $cdr;
+        }
+
+        $inner = $cdr['cdr'];
+
+        if (is_string($inner)) {
+            $decoded = json_decode($inner, true);
+            $inner = is_array($decoded) ? $decoded : null;
+        }
+
+        return is_array($inner) ? $inner : $cdr;
     }
 }

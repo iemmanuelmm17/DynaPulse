@@ -7,6 +7,7 @@ namespace DynaPulse\Service;
 use DynaPulse\NetSapiens\CdrMapper;
 use DynaPulse\NetSapiens\NsException;
 use DynaPulse\NetSapiens\NsGateway;
+use DynaPulse\NetSapiens\TranscriptionReference;
 use DynaPulse\Repository\DomainRepository;
 use DynaPulse\Support\Config;
 use DynaPulse\Support\Time;
@@ -181,6 +182,25 @@ final class NsDiagnostics
             }
 
             $mapped = CdrMapper::map($rows[0], $name);
+
+            $sample = $rows[0];
+            $reference = TranscriptionReference::fromCdr($sample);
+            $origId = trim((string) ($sample['call-orig-call-id'] ?? ''));
+            $termId = trim((string) ($sample['call-term-call-id'] ?? ''));
+            $jobId = trim((string) ($sample['call-intelligence-job-id'] ?? ''));
+
+            $lines[] = '        transcript identifiers on that CDR (requested with raw=yes):';
+            $lines[] = '          call-orig-call-id  ' . ($origId !== '' ? $origId : '(absent or null)');
+            $lines[] = '          call-term-call-id  ' . ($termId !== '' ? $termId : '(absent or null)');
+            $lines[] = '          job id             ' . ($jobId !== '' ? $jobId : '(absent or null)');
+            $lines[] = '          prefilled link     ' . ($reference !== null
+                ? $reference->domain . ' / ' . $reference->jobId . ' / ' . $reference->month
+                : '(absent)');
+
+            if ($origId === '' && $termId === '' && $reference === null) {
+                $lines[] = '          → NetSapiens returned none of them, so this domain is not producing';
+                $lines[] = '            Call Intelligence jobs: enable recording transcription for it.';
+            }
 
             $lines[] = '        sample CDR → call_id ' . $mapped['call_id'];
             $lines[] = '          started  ' . ((string) ($mapped['started_at'] ?? '') !== '' ? (string) $mapped['started_at'] : '(no call-start-datetime!)');
