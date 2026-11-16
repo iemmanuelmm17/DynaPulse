@@ -851,6 +851,40 @@ test('A CDR without call ids still gets its transcript when the job id is enough
     assertContains('reboot', (string) $row['transcript_summary']);
 });
 
+test('A user-owned recording is found under /users/<user>/recordings', function () use ($container, $fakeNs): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domainRepo->ensure('userec.test', 'User rec', 'UTC');
+
+    // Only the user-scoped path has it, exactly like the Birns cluster.
+    $fakeNs->recordingUserFixtures['userec.test:6001:0_2654816984@172.16.10.109'] = [
+        'call-recording-status' => 'converted',
+        'call-id' => '0_2654816984@172.16.10.109',
+        'file-duration-seconds' => 101,
+        'file-access-url' => 'https://mis1.example/ns-api/?object=recording&action=play&calid=0_2654816984@172.16.10.109',
+        'file-size-kilobytes' => 0,
+    ];
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+    $result = $ingest->ingestCdr('userec.test', [
+        'domain' => 'userec.test',
+        'call-id' => '0_2654816984@172.16.10.109',
+        'call-orig-call-id' => '0_2654816984@172.16.10.109',
+        'call-term-user' => '6001',
+        'call-orig-from-user' => '4099208551',
+        'call-start-datetime' => '2026-11-16T15:56:29+00:00',
+        'call-total-duration-seconds' => 101,
+    ], true);
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $row = $calls->find((int) $result['call_id']);
+    assertSame(1, (int) $row['has_recording'], 'the recording is stored');
+    assertSame(101, (int) $row['recording_duration'], 'the duration comes from the payload');
+    assertContains('calid=0_2654816984', (string) $row['recording_url']);
+});
+
 test('Domains keep the NetSapiens spelling and stay unique per case', function () use ($container): void {
     /** @var DomainRepository $domains */
     $domains = $container->get(DomainRepository::class);

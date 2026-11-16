@@ -374,6 +374,15 @@ final class CallRepository
     /** Repair the NetSapiens identifiers of a row ingested without them. */
     public function patchIdentifiers(int $id, string $origCallId, string $termCallId = '', string $jobId = ''): void
     {
+        // A row that was written before its call ids arrived says "no recording"
+        // only because it had nothing to ask for; once the id is known the
+        // lookup has to run again, otherwise the player stays empty forever.
+        $this->db->execute(
+            "UPDATE calls SET recording_status = 'pending'" .
+            " WHERE id = :id AND has_recording = 0 AND recording_status = 'none'",
+            ['id' => $id],
+        );
+
         $data = ['orig_call_id' => $origCallId];
 
         if ($termCallId !== '') {

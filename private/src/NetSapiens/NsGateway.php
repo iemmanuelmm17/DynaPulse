@@ -34,8 +34,8 @@ interface NsGateway
         string $plainCallId = '',
     ): array;
 
-    /** @return array<string, mixed>|null */
-    public function recording(string $domain, string $callId): ?array;
+    /** @param list<string> $users @return array<string, mixed>|null */
+    public function recording(string $domain, string $callId, array $users = []): ?array;
 
     /** @param array<string, mixed> $payload @return array<string, mixed> */
     public function createSubscription(array $payload): array;

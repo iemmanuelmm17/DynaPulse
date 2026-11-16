@@ -95,9 +95,26 @@ final class FakeNs implements NsGateway
         return $this->transcriptionFixtures[$key];
     }
 
-    public function recording(string $domain, string $callId): ?array
+    /** Keyed "domain:user:callid": recordings only visible under a user. */
+    public array $recordingUserFixtures = [];
+
+    public function recording(string $domain, string $callId, array $users = []): ?array
     {
-        return $this->recordingFixtures[$domain . ':' . $callId] ?? null;
+        $direct = $this->recordingFixtures[$domain . ':' . $callId] ?? null;
+
+        if ($direct !== null) {
+            return $direct;
+        }
+
+        foreach ($users as $user) {
+            $scoped = $this->recordingUserFixtures[$domain . ':' . $user . ':' . $callId] ?? null;
+
+            if ($scoped !== null) {
+                return $scoped;
+            }
+        }
+
+        return null;
     }
 
     public function createSubscription(array $payload): array

@@ -66,7 +66,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.15';
+const DP_CODE_BUILD = '2026.11.16.16';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -393,7 +393,8 @@ try {
             $out('  php        ' . PHP_VERSION . '  (' . PHP_SAPI . ')');
             $out('  private    ' . $base);
             $out('  database   ' . (string) $config->get('db.database', ''));
-            $out('  features   raw CDRs (raw=yes), prefilled-transcription, job-id-only lookup, domain re-spelling, per-domain audit');
+            $out('  features   raw CDRs (raw=yes), prefilled-transcription, job-id-only lookup, user-scoped recordings,');
+            $out('             domain re-spelling, per-domain audit');
 
             /** @var Database $versionDb */
             $versionDb = $container->get(Database::class);

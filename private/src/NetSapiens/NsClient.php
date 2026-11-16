@@ -172,20 +172,45 @@ final class NsClient implements NsGateway
         return array_values(array_unique($variants));
     }
 
-    public function recording(string $domain, string $callId): ?array
+    /**
+     * Recordings live under two different paths depending on who owns them:
+     * /domains/<d>/recordings/<callid> is the domain-wide view, while a user's
+     * own recordings only answer under /domains/<d>/users/<user>/recordings/<callid>.
+     * The CDR's call-term-user / call-orig-from-user is the user to ask about.
+     *
+     * @param list<string> $users
+     */
+    public function recording(string $domain, string $callId, array $users = []): ?array
     {
-        try {
-            $result = $this->request('GET', '/domains/' . rawurlencode($domain) . '/recordings/' . rawurlencode($callId));
-        } catch (NsException $e) {
-            if ($e->isNotFound()) {
-                return null;
+        $paths = ['/domains/' . rawurlencode($domain) . '/recordings/' . rawurlencode($callId)];
+
+        foreach ($users as $user) {
+            $user = trim((string) $user);
+
+            if ($user !== '') {
+                $paths[] = '/domains/' . rawurlencode($domain) . '/users/' . rawurlencode($user)
+                    . '/recordings/' . rawurlencode($callId);
             }
-            throw $e;
         }
 
-        foreach (self::listOf($result) as $recording) {
-            if (is_array($recording) && ($recording['file-access-url'] ?? '') !== '') {
-                return $recording;
+        foreach ($paths as $path) {
+            try {
+                $result = $this->request('GET', $path);
+            } catch (NsException $e) {
+                // "Not here" is the normal answer for every path but the right one.
+                if ($e->isNotFound() || $e->status === 400 || $e->status === 403) {
+                    continue;
+                }
+
+                throw $e;
+            }
+
+            foreach (self::listOf($result) as $recording) {
+                if (is_array($recording) && (string) ($recording['file-access-url'] ?? '') !== '') {
+                    Logger::debug('netsapiens.recording_found', ['path' => $path]);
+
+                    return $recording;
+                }
             }
         }
 

@@ -190,7 +190,7 @@ final class CallProcessor
 
         if ((int) $call['has_recording'] === 0 && $call['recording_status'] !== 'none' && self::usableCallId($recordingCallId)) {
             try {
-                $recording = $this->ns->recording($nsDomain, $recordingCallId);
+                $recording = $this->ns->recording($nsDomain, $recordingCallId, self::recordingUsers($call, $rawCdr));
 
                 if ($recording !== null) {
                     $updates['recording_status'] = 'available';
@@ -365,6 +365,42 @@ final class CallProcessor
         }
 
         return $this->domainIndex[strtolower($domainName)] ?? null;
+    }
+
+    /**
+     * Which users to ask about when the domain-wide recording path answers 404.
+     * The CDR names the agent on the call (call-term-user / call-orig-from-user);
+     * the same call is usually filed under that user's own recordings.
+     *
+     * @param array<string, mixed> $call
+     * @param array<string, mixed> $rawCdr
+     * @return list<string>
+     */
+    private static function recordingUsers(array $call, array $rawCdr): array
+    {
+        $candidates = [];
+
+        foreach (['call-term-user', 'call-orig-from-user', 'call-orig-user', 'call-term-from-user', 'call-orig-to-user'] as $key) {
+            $candidates[] = trim((string) ($rawCdr[$key] ?? ''));
+        }
+
+        foreach (['called_number', 'answered_by', 'caller_number'] as $key) {
+            $candidates[] = trim((string) ($call[$key] ?? ''));
+        }
+
+        $users = [];
+
+        foreach ($candidates as $candidate) {
+            if ($candidate !== '' && !in_array($candidate, $users, true)) {
+                $users[] = $candidate;
+            }
+
+            if (count($users) === 3) {
+                break;
+            }
+        }
+
+        return $users;
     }
 
     /** Our own placeholder id ("cdr-<hash>") can never be used against the API. */
