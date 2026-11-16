@@ -34,14 +34,36 @@ error_reporting(E_ALL);
 ini_set('display_errors', $config->isDebug() ? '1' : '0');
 ini_set('log_errors', '1');
 
-Logger::boot((string) $config->get('paths.logs'), (string) $config->get('security.log_level', 'info'));
+if (!extension_loaded('pdo_sqlite')) {
+    throw new RuntimeException(
+        'The pdo_sqlite extension is not enabled. Add "extension=pdo_sqlite" (and "extension=sqlite3") to php.ini, then restart IIS.',
+    );
+}
+
+$storageRoot = __DIR__ . DIRECTORY_SEPARATOR . 'storage';
 
 foreach (['storage', 'storage/logs', 'storage/sessions', 'storage/cache', 'storage/tmp', 'storage/db', 'storage/recordings'] as $directory) {
     $path = __DIR__ . DIRECTORY_SEPARATOR . str_replace('/', DIRECTORY_SEPARATOR, $directory);
+
     if (!is_dir($path)) {
         @mkdir($path, 0775, true);
     }
+
+    if (!is_dir($path)) {
+        throw new RuntimeException(
+            'Cannot create the folder ' . $path . '. Create it manually and give the IIS application pool (IIS AppPool\\<pool name>) Modify permission on ' . $storageRoot . '.',
+        );
+    }
 }
+
+if (!is_writable($storageRoot)) {
+    throw new RuntimeException(
+        'The storage folder is not writable by the PHP account: ' . $storageRoot
+        . '. Give the IIS application pool (IIS AppPool\\<pool name>) Modify permission on that folder and its subfolders.',
+    );
+}
+
+Logger::boot((string) $config->get('paths.logs'), (string) $config->get('security.log_level', 'info'));
 
 $databasePath = (string) $config->get('db.database');
 if (!preg_match('#^(?:[A-Za-z]:[\\\\/]|/|\\\\\\\\)#', $databasePath)) {
@@ -90,7 +112,13 @@ try {
     }
 } catch (Throwable $e) {
     Logger::exception($e, 'database.migration_failed');
-    throw $e;
+
+    throw new RuntimeException(
+        'The SQLite database could not be prepared at ' . $databasePath . ': ' . $e->getMessage()
+        . '. Check that the folder ' . dirname($databasePath) . ' is writable by the IIS application pool.',
+        0,
+        $e,
+    );
 }
 
 $container->set(Migrator::class, $migrator);
