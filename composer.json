@@ -1,0 +1,41 @@
+{
+    "name": "dynapulse/portal",
+    "description": "DynaPulse - NetSapiens call recording intelligence portal with keyword alerting",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.5",
+        "ext-pdo": "*",
+        "ext-pdo_sqlite": "*",
+        "ext-curl": "*",
+        "ext-json": "*",
+        "ext-mbstring": "*",
+        "ext-openssl": "*"
+    },
+    "suggest": {
+        "ext-zip": "Required for XLSX exports (CSV always works without it)",
+        "ext-sqlite3": "Not required at runtime, PDO SQLite driver is used"
+    },
+    "autoload": {
+        "psr-4": {
+            "DynaPulse\\": "private/src/"
+        },
+        "files": [
+            "private/src/helpers.php"
+        ]
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    },
+    "scripts": {
+        "test": "php private/tests/run.php",
+        "migrate": "php private/bin/console.php migrate",
+        "serve": "php -S 127.0.0.1:8080 -t public public/index.php"
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "DynaPulse\\Tests\\": "private/tests/"
+        }
+    }
+}
