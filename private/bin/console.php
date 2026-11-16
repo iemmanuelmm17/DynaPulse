@@ -66,7 +66,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.12';
+const DP_CODE_BUILD = '2026.11.16.13';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -902,12 +902,29 @@ try {
                         $probeDomain = $listed;
                     } elseif ($listed === null) {
                         $out('');
-                        $out('  warning: /domains does not list "' . $probeDomain . '" for this API key.');
+                        $out('  note: /domains does not list "' . $probeDomain . '" — the key is probably');
+                        $out('        scoped to that domain, so it can read its CDRs but not the domain list.');
                     }
                 } catch (NsException) {
                     // The domain list is a nicety; the probe below is the real answer.
                 }
             }
+
+            $usable = static fn (string $id): bool => $id !== '' && !str_starts_with($id, 'cdr-');
+
+            if (!$usable($probeOrig) && !$usable($probeTerm) && !$usable($probePlain)) {
+                $out('');
+                $out('  cannot probe: the stored CDR has no usable call id — "cdr-…" is our own hash,');
+                $out('  which NetSapiens has never heard of (sending it earns a 403 "Invalid domain or callids").');
+                $out('  The CDR must be re-fetched with raw=yes for the ids to appear:');
+                $out('    php bin\console.php poll 168 --domain=' . $probeDomain);
+                $out('    php bin\console.php ns:test --domain=' . $probeDomain . ' --hours=48');
+                break;
+            }
+
+            $probeOrig = $usable($probeOrig) ? $probeOrig : '';
+            $probeTerm = $usable($probeTerm) ? $probeTerm : '';
+            $probePlain = $usable($probePlain) ? $probePlain : '';
 
             $shapes = [];
 

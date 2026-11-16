@@ -189,7 +189,8 @@ final class NsDiagnostics
             $termId = trim((string) ($sample['call-term-call-id'] ?? ''));
             $jobId = trim((string) ($sample['call-intelligence-job-id'] ?? ''));
 
-            $lines[] = '        transcript identifiers on that CDR (requested with raw=yes):';
+            $lines[] = '        keys on that CDR (requested with raw=yes): ' . implode(', ', array_slice(array_keys($sample), 0, 80));
+            $lines[] = '        transcript identifiers on that CDR:';
             $lines[] = '          call-orig-call-id  ' . ($origId !== '' ? $origId : '(absent or null)');
             $lines[] = '          call-term-call-id  ' . ($termId !== '' ? $termId : '(absent or null)');
             $lines[] = '          job id             ' . ($jobId !== '' ? $jobId : '(absent or null)');
