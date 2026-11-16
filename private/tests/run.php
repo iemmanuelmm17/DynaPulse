@@ -696,6 +696,42 @@ test('A CDR that only carries call-id is queried with that id', function () use 
     assertTrue((string) $row['transcript_status'] !== 'unavailable', 'a 404 leaves it pending, not unavailable');
 });
 
+test('Re-polling adopts the real call id instead of inserting a twin', function () use ($container): void {
+    /** @var DomainRepository $domainRepo */
+    $domainRepo = $container->get(DomainRepository::class);
+    $domain = $domainRepo->ensure('rekey.test', 'Rekey', 'UTC');
+
+    /** @var IngestService $ingest */
+    $ingest = $container->get(IngestService::class);
+
+    // First sighting: trimmed CDR, no ids at all -> synthetic cdr-<hash> id.
+    $first = $ingest->ingestCdr('rekey.test', [
+        'call-start-datetime' => '2026-11-16T15:56:31+00:00',
+        'call-intelligence-job-id' => 78920299,
+    ], false);
+
+    /** @var CallRepository $calls */
+    $calls = $container->get(CallRepository::class);
+    $before = $calls->find((int) $first['call_id']);
+    assertTrue(str_starts_with((string) $before['call_id'], 'cdr-'), 'stored under the synthetic id');
+
+    // Re-poll with raw=yes: same job id, now with real call ids.
+    $second = $ingest->ingestCdr('rekey.test', [
+        'call-orig-call-id' => '0_2654816984@172.16.10.109',
+        'call-term-call-id' => '20261116155631007599-cac18a7984653a998c54034ec629e12c',
+        'call-start-datetime' => '2026-11-16T15:56:31+00:00',
+        'call-intelligence-job-id' => 78920299,
+    ], false);
+
+    $after = $calls->find((int) $second['call_id']);
+    assertSame((int) $before['id'], (int) $after['id'], 'the same row is reused');
+    assertSame('0_2654816984@172.16.10.109', (string) $after['call_id'], 're-keyed to the real call id');
+
+    $twins = $calls->transcriptCoverage(500)['sampled'];
+    $byJob = $calls->findByJobId((int) $domain['id'], '78920299');
+    assertSame((int) $before['id'], (int) $byJob['id'], 'the job id still points at one row');
+});
+
 test('calls:audit sees which identifiers the stored CDRs carry', function () use ($container): void {
     /** @var DomainRepository $domainRepo */
     $domainRepo = $container->get(DomainRepository::class);

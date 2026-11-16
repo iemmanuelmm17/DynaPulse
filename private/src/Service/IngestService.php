@@ -99,6 +99,24 @@ final class IngestService
 
         $mapped = CdrMapper::map($cdr, $domainName);
         $existing = $this->calls->findByCallId((int) $domain['id'], (string) $mapped['call_id']);
+
+        // Re-polling with raw=yes replaces our synthetic "cdr-<hash>" call id with
+        // the real one. Match the existing row by job id and re-key it, so the
+        // same call is not stored twice and its id in the UI stays valid.
+        if ($existing === null && (string) ($mapped['transcript_job_id'] ?? '') !== '') {
+            $byJob = $this->calls->findByJobId((int) $domain['id'], (string) $mapped['transcript_job_id']);
+
+            if ($byJob !== null) {
+                $this->calls->adoptMapped((int) $byJob['id'], $mapped);
+                $existing = $byJob;
+                Logger::info('ingest.call_id_adopted', [
+                    'call_id' => $byJob['id'],
+                    'from' => (string) $byJob['call_id'],
+                    'to' => (string) $mapped['call_id'],
+                ]);
+            }
+        }
+
         $call = $this->calls->upsertFromCdr((int) $domain['id'], $mapped);
 
         $callId = (int) ($call['id'] ?? 0);

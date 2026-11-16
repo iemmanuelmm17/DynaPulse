@@ -11,6 +11,7 @@ declare(strict_types=1);
  *   php private/bin/console.php transcript:test --call=123 [--apply] [--raw]
  *   php private/bin/console.php calls:reprocess [--limit=50]
  *   php private/bin/console.php calls:audit [--limit=500] [--show=3]
+ *   php private/bin/console.php calls:find --job=78920299
  *   php private/bin/console.php domains:sync
  *   php private/bin/console.php poll [hours]
  *   php private/bin/console.php process [--limit=25] [--budget=50] [--call=ID]
@@ -64,7 +65,7 @@ $build = $build !== '' ? $build : 'unknown';
 
 // Keep in sync with private/VERSION: a mismatch means only some of the files
 // were replaced, which is the usual reason "the fix isn't working".
-const DP_CODE_BUILD = '2026.11.16.9';
+const DP_CODE_BUILD = '2026.11.16.10';
 
 /** @var Container $container */
 $container = require $base . DIRECTORY_SEPARATOR . 'bootstrap.php';
@@ -131,6 +132,24 @@ function dp_repair_identifiers(CallRepository $calls, int $id, array $row): bool
     return true;
 }
 
+
+/**
+ * One-line summary of the identifiers a stored CDR carries.
+ *
+ * @param array<string, mixed> $raw
+ */
+function dp_describe_identifiers(array $raw): string
+{
+    $parts = [];
+
+    foreach (['call-orig-call-id' => 'orig', 'call-term-call-id' => 'term', 'call-id' => 'call-id',
+        'call-intelligence-job-id' => 'job', 'prefilled-transcription-api' => 'prefilled'] as $key => $label) {
+        $value = trim((string) ($raw[$key] ?? ''));
+        $parts[] = $label . ' ' . ($value !== '' ? $value : '—');
+    }
+
+    return implode(' · ', $parts);
+}
 
 /**
  * Recursive copy used by `update`; returns the number of files written.
@@ -401,6 +420,7 @@ try {
             $out('                                add --cdr to print the stored CDR identity, --raw for the payload');
             $out('  calls:reprocess [--limit]     retry calls that have a job id but no stored transcript');
             $out('  calls:audit [--limit] [--show] which identifiers the stored CDRs actually carry');
+            $out('  calls:find --id= --job= --number=   locate a call by portal id, job id or number');
             $out('  domains:sync                  import the domains visible to the API key');
             $out('  process [--limit] [--budget]  work through the processing queue');
             $out('                                add --call=ID to process one call and print the outcome');
@@ -964,6 +984,94 @@ try {
                 $out('  matches             ' . (int) ($fresh['match_count'] ?? 0));
                 $out('  last_error          ' . ((string) ($fresh['last_error'] ?? '') !== '' ? (string) $fresh['last_error'] : '—'));
             }
+            break;
+
+        case 'calls:find':
+            /** @var Database $findDb */
+            $findDb = $container->get(Database::class);
+            $limit = $number('limit', 5, 1, 50);
+
+            $byId = $option('id');
+            $byJob = $option('job');
+            $byNumber = $option('number');
+            $byCallId = $option('call-id');
+
+            if ($byId === null && $byJob === null && $byNumber === null && $byCallId === null) {
+                $fail('Give one of --id=, --job=, --number= or --call-id=.');
+            }
+
+            $sql = 'SELECT c.id, c.call_id, c.orig_call_id, c.term_call_id, c.transcript_job_id,
+                           c.has_transcript, c.transcript_status, c.status, c.attempts, c.started_at,
+                           c.caller_number, c.called_number, c.raw_cdr, d.domain AS domain_name
+                      FROM calls c LEFT JOIN domains d ON d.id = c.domain_id';
+            $where = [];
+            $bind = [];
+
+            if ($byId !== null && is_numeric($byId)) {
+                $where[] = 'c.id = :id';
+                $bind['id'] = (int) $byId;
+            }
+
+            if ($byJob !== null) {
+                $where[] = '(c.transcript_job_id = :job OR c.raw_cdr LIKE :joblike)';
+                $bind['job'] = (string) $byJob;
+                $bind['joblike'] = '%' . $byJob . '%';
+            }
+
+            if ($byCallId !== null) {
+                $where[] = '(c.call_id = :callid OR c.orig_call_id = :callid OR c.term_call_id = :callid OR c.raw_cdr LIKE :callidlike)';
+                $bind['callid'] = (string) $byCallId;
+                $bind['callidlike'] = '%' . $byCallId . '%';
+            }
+
+            if ($byNumber !== null) {
+                $where[] = '(c.caller_number LIKE :number OR c.called_number LIKE :number OR c.raw_cdr LIKE :numberlike)';
+                $bind['number'] = '%' . $byNumber . '%';
+                $bind['numberlike'] = '%' . $byNumber . '%';
+            }
+
+            $rows = $findDb->select($sql . ' WHERE ' . implode(' AND ', $where) . ' ORDER BY c.id DESC LIMIT ' . $limit, $bind);
+
+            if ($rows === []) {
+                $out('No call matched.');
+
+                if ($byId !== null && is_numeric($byId)) {
+                    $out('  Id ' . (int) $byId . ' is not in this database — the number in the URL may');
+                    $out('  belong to a row that was re-created when its call id changed. Find it by job:');
+                    $out('    php bin/console.php calls:find --job=<call-intelligence-job-id>');
+                }
+
+                break;
+            }
+
+            $out(count($rows) . ' match(es):');
+
+            foreach ($rows as $row) {
+                $raw = json_decode((string) ($row['raw_cdr'] ?? ''), true);
+                $raw = is_array($raw) ? $raw : [];
+
+                $out('');
+                $out(sprintf(
+                    '  #%-6s %-22s %-20s %s',
+                    (string) $row['id'],
+                    (string) ($row['domain_name'] ?? ''),
+                    (string) ($row['started_at'] ?? ''),
+                    (string) ($row['caller_number'] ?? '') . ' -> ' . (string) ($row['called_number'] ?? ''),
+                ));
+                $out('    page            /calls/' . (string) $row['id']);
+                $out('    call_id         ' . (string) $row['call_id']);
+                $out('    orig / term     ' . ((string) ($row['orig_call_id'] ?? '') !== '' ? (string) $row['orig_call_id'] : '(empty)')
+                    . ' / ' . ((string) ($row['term_call_id'] ?? '') !== '' ? (string) $row['term_call_id'] : '(empty)'));
+                $out('    job id          ' . ((string) ($row['transcript_job_id'] ?? '') !== '' ? (string) $row['transcript_job_id'] : '(none)'));
+                $out('    status          ' . (string) $row['status'] . ' · attempt ' . (int) $row['attempts']
+                    . ' · transcript ' . (string) $row['transcript_status'] . ' · has_transcript ' . (int) $row['has_transcript']);
+                $out('    CDR identifiers  ' . dp_describe_identifiers($raw));
+
+                if ((int) $row['has_transcript'] !== 1) {
+                    $out('    next            php bin/console.php transcript:test --call=' . (string) $row['id']);
+                }
+            }
+
             break;
 
         case 'repair':

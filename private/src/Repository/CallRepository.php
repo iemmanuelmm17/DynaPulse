@@ -125,6 +125,49 @@ final class CallRepository
         return $row === null ? null : self::hydrate($row);
     }
 
+    /** A call is identified across re-polls by the Call Intelligence job id too. */
+    public function findByJobId(int $domainId, string $jobId): ?array
+    {
+        if (trim($jobId) === '') {
+            return null;
+        }
+
+        $id = $this->db->scalar(
+            'SELECT id FROM calls WHERE domain_id = :d AND transcript_job_id = :j ORDER BY id LIMIT 1',
+            ['d' => $domainId, 'j' => trim($jobId)],
+        );
+
+        return $id === null ? null : $this->find((int) $id);
+    }
+
+    /**
+     * Re-key an existing row to the identifiers of a freshly fetched CDR.
+     *
+     * A re-poll with raw=yes turns our synthetic "cdr-<hash>" call id into the
+     * real one; without this the same call would be inserted a second time.
+     *
+     * @param array<string, mixed> $mapped
+     */
+    public function adoptMapped(int $id, array $mapped): void
+    {
+        $data = [
+            'call_id' => (string) $mapped['call_id'],
+            'orig_call_id' => (string) ($mapped['orig_call_id'] ?? ''),
+            'term_call_id' => (string) ($mapped['term_call_id'] ?? ''),
+            'updated_at' => Time::now(),
+        ];
+
+        if ((string) ($mapped['transcript_job_id'] ?? '') !== '') {
+            $data['transcript_job_id'] = (string) $mapped['transcript_job_id'];
+        }
+
+        if ((array) ($mapped['raw'] ?? []) !== []) {
+            $data['raw_cdr'] = json_encode($mapped['raw'], JSON_UNESCAPED_SLASHES) ?: '{}';
+        }
+
+        $this->db->update('calls', $data, 'id = :id', ['id' => $id]);
+    }
+
     public function findByCallId(int $domainId, string $callId): ?array
     {
         $id = $this->db->scalar(

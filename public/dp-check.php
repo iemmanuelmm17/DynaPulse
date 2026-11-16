@@ -170,7 +170,14 @@ if ($privatePath !== null) {
         try {
             $pdo = new PDO('sqlite:' . $dbPath, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
             $tables = $pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'")->fetchColumn();
+            $calls = (int) $pdo->query('SELECT COUNT(*) FROM calls')->fetchColumn();
+            $domains = (int) $pdo->query('SELECT COUNT(*) FROM domains')->fetchColumn();
             $add('SQLite database', true, $dbPath . ' (' . (int) $tables . ' tables' . ($dbExists ? '' : ', will be created on first request') . ')');
+            $add(
+                'Stored data',
+                true,
+                $calls . ' call(s), ' . $domains . ' domain(s) — compare with `php bin\\console.php version`; a different number means the web app and the CLI read different databases',
+            );
         } catch (Throwable $e) {
             $add('SQLite database', false, $dbPath . ' — ' . $e->getMessage());
         }
