@@ -1,1 +1,420 @@
 # DynaPulse
+
+**Call intelligence and keyword alerting for NetSapiens.** DynaPulse turns recorded calls into
+readable transcripts, summaries and sentiment, watches every conversation for the words that matter
+to your business, and emails the right people the moment a call is flagged — with a one-click link to
+listen to the recording.
+
+- **Manager portal per domain** — sign in with the same credentials you use for NetSapiens.
+- **Keyword watchlist + notification list** — admins define multiple keywords and the email
+  addresses that should hear about them. Alerts include caller, called number, date/time, AI summary,
+  what triggered the notification, and a **Listen** button.
+- **NetSapiens Call Intelligence** is the source for transcript, summary, topics and sentiment — no
+  third-party speech-to-text or LLM is involved.
+- **Reports and scheduled exports** — dashboards, CSV/XLSX downloads, and emailed digests on a daily,
+  weekly or monthly cadence.
+- **Dark mode by default** (with a light theme), toast notifications, keyboard shortcuts, and a
+  responsive layout.
+
+---
+
+## Contents
+
+1. [Requirements](#requirements)
+2. [Architecture](#architecture)
+3. [Installation](#installation)
+4. [Configuration](#configuration)
+5. [NetSapiens setup](#netsapiens-setup)
+6. [Scheduled jobs](#scheduled-jobs)
+7. [How alerting works](#how-alerting-works)
+8. [Roles](#roles)
+9. [Exports and reports](#exports-and-reports)
+10. [Security notes](#security-notes)
+11. [Testing](#testing)
+12. [Troubleshooting](#troubleshooting)
+
+---
+
+## Requirements
+
+| Component | Version / notes |
+|---|---|
+| PHP | **8.5** (NTS recommended), extensions: `pdo_sqlite`, `curl`, `openssl`, `mbstring`, `json`, `zip`, `fileinfo` |
+| Web server | Apache 2.4 (**XAMPP** — `.htaccess` included) or IIS 10+ (`web.config` included); nginx needs the same two rewrite lines |
+| Database | SQLite 3 — one file under `private\storage\db` |
+| NetSapiens | API v2 access (`/tokens`, `/domains/{domain}/cdrs`, `/transcriptions`, `/recordings`, `/subscriptions`) |
+| Mail | Microsoft 365 / Outlook **SMTP AUTH** (`smtp.office365.com:587`, STARTTLS) |
+| OS | Windows Server 2016+ (Task Scheduler runs the CLI worker) |
+
+No Composer packages are required at runtime; the app ships with its own autoloader, SMTP client,
+MIME builder and XLSX writer. `composer.json` only defines PSR-4 autoloading for development.
+
+## Architecture
+
+```
+D:\www\dynapulse\public          <- document root (or a sub-folder of the site)
+├── index.php                    <- front controller
+├── .htaccess                    <- Apache/XAMPP rewrite + security
+├── web.config                   <- IIS rewrite rules, security headers
+├── favicon.svg
+└── assets\{css,js}
+
+D:\private\dynapulse             <- application (outside the web root)
+├── .env                         <- secrets (never served)
+├── bootstrap.php                <- Env → Config → Logger → DB → Container
+├── routes.php
+├── bin\console.php              <- CLI worker (poll, process, notify, reports, prune)
+├── migrations\001_init.sql
+├── src\                         <- PSR-4 DynaPulse\*
+│   ├── Http\                    <- kernel, router, request/response, middleware, controllers
+│   ├── Repository\              <- SQLite access layer
+│   ├── NetSapiens\              <- API client, CDR mapper, transcription value object
+│   ├── Service\                 <- auth, ingest, processing, matching, alerts, reports, export
+│   ├── Mail\                    <- SMTP transport + MIME builder
+│   └── Support\                 <- config, env, logging, time, strings
+├── views\                       <- PHP templates (dashboard, calls, alerts, admin…)
+├── tests\                       <- dependency-free suite with a NetSapiens fake
+└── storage\                     <- logs, sessions, SQLite, cached recordings
+```
+
+**Ingestion has two independent paths** that converge on the same queue:
+
+1. **Webhook** — a NetSapiens `cdr` event subscription POSTs completed calls to
+   `/webhook/netsapiens/{secret}`. Posts are JSON arrays and validated twice: the secret in the path
+   and (when configured) the `X-Correlation-ID` header.
+2. **Poller** — `console.php poll` queries `/domains/{domain}/cdrs` with an overlapping time window,
+   so calls are never lost if a webhook post fails. Duplicates merge on the NetSapiens call id.
+
+Each queued call is then processed: Call Intelligence transcript/summary/topics/sentiment →
+recording lookup → keyword matching → one grouped alert email.
+
+## Installation
+
+### 1. Place the files
+
+Copy the repository so that the layout matches the tree above:
+
+```
+public\   ->  D:\www\DynaPulse\public
+everything else -> D:\private\DynaPulse
+```
+
+If your paths differ, create `public\private_path.php` containing the absolute path to the private
+folder, e.g.
+
+```php
+<?php return 'D:\\apps\\DynaPulse-private';
+```
+
+(You can also set the `DYN_PULSE_PRIVATE` environment variable in IIS.)
+
+### Sub-folder deployments
+
+`public\` does not have to be a site root. If the site root is `D:\www` and DynaPulse lives in
+`D:\www\dynapulse\public`, the portal is simply reached at `http://<server>/dynapulse/public/`.
+
+The URL prefix is detected automatically from `DOCUMENT_ROOT` / `SCRIPT_FILENAME`, and every link,
+form action, asset, redirect, cookie path and e-mail URL is generated with that prefix, so both
+layouts work without configuration:
+
+```
+Site root deployment                     Sub-folder deployment
+D:\www\dynapulse\public   ->  /          D:\www                    ->  /
+                                         D:\www\dynapulse\public   ->  /dynapulse/public/
+```
+
+If the web server hides that information (a reverse proxy that rewrites the path, for example), pin
+it explicitly with `public\base_path.php`:
+
+```php
+<?php return '/dynapulse/public';
+```
+
+The `DYN_PULSE_BASE` environment variable does the same thing. `dp-check.php` shows the detected
+prefix under *Request → URL prefix*.
+
+### 2. Configure the web server
+
+**Apache / XAMPP**
+
+Put the public folder inside `htdocs`, e.g. `D:\xampp\htdocs\dynapulse\public`, and keep the
+private folder outside it (`D:\private\dynapulse`). Then:
+
+1. In `httpd.conf` make sure `LoadModule rewrite_module modules/mod_rewrite.so` is **not**
+   commented out (XAMPP enables it by default).
+2. The htdocs `<Directory>` block must say `AllowOverride All` (XAMPP default). With
+   `AllowOverride None` Apache ignores `.htaccess`.
+3. Restart Apache from the XAMPP control panel.
+
+`public\.htaccess` rewrites every non-file request to `index.php`, and denies dotfiles,
+`.sql`/`.sqlite`/`.log`/`.bak` files and `composer.json`. Apache runs as a service account that
+normally already has write access to `storage`; if the portal says otherwise, grant that account
+Modify on `D:\private\dynapulse\storage`.
+
+> Without `.htaccess` the portal still opens at `http://server/dynapulse/public/` (index.php is the
+> directory index) but `/login`, `/calls`, `/dashboard`… return
+> “The requested URL was not found on this server”.
+
+**IIS 10+**
+
+Create the site with **Physical path** `D:\www\dynapulse\public` (or point it at the parent folder
+for a sub-folder deployment). Install the *URL Rewrite* module. `web.config` already:
+
+- blocks dotfiles and database/log/backup extensions,
+- optionally forces HTTPS (the rule ships commented out, because a server reached by IP address
+  usually has no certificate — uncomment it once the site has a TLS binding),
+- rewrites every non-file request to `index.php`,
+- sets MIME types for `.svg`/`.woff2` and 7-day static caching.
+
+Make sure the application pool identity can **write** to `D:\private\dynapulse\storage` (logs,
+sessions, SQLite, recording cache).
+
+### 3. Create the environment file
+
+```bat
+copy D:\private\DynaPulse\.env.example D:\private\DynaPulse\.env
+```
+
+Edit `.env` (see [Configuration](#configuration)), then generate the application key:
+
+```bat
+cd /d D:\private\DynaPulse
+php bin\console.php key:generate
+```
+
+### 4. Create the schema
+
+```bat
+php bin\console.php migrate
+```
+
+The schema is also created automatically on the first HTTP request when the database is empty.
+
+### 5. Sign in
+
+Open the portal, sign in with a NetSapiens user (e.g. `admin@acme.com`). **The first successful
+sign-in becomes the DynaPulse administrator**; every later user is provisioned as a manager of their
+own domain. Promote or disable people under *Administration → Portal users*.
+
+Add the domains you want to monitor under **Administration → Domains**, or press *Sync from
+NetSapiens*.
+
+## Configuration
+
+All secrets live in `D:\private\DynaPulse\.env`. Behavioural settings (alert threshold, retention,
+recipients fallbacks) live in the database and are edited under **Administration → Settings**.
+
+| Key | Purpose |
+|---|---|
+| `APP_URL` | Public base URL, used in emails and signed recording links. **No trailing slash.** |
+| `APP_KEY` | 32+ random chars; signs the “Listen” links. Generate with `console.php key:generate`. |
+| `APP_TIMEZONE` | Fallback timezone for domains without their own. |
+| `PUBLIC_PATH` | Optional absolute path to the public folder if it is not the site root. |
+| `DB_DATABASE` | Optional path to the SQLite file; defaults to `storage\db\dynapulse.sqlite`. |
+| `NS_BASE_URL` | `https://ns-api.com` or your own NetSapiens API host. |
+| `NS_API_KEY` | Machine API key used to read CDRs, transcripts and recordings. |
+| `NS_CLIENT_ID` / `NS_CLIENT_SECRET` | OAuth client used to validate manager sign-ins via `POST /tokens`. |
+| `WEBHOOK_SECRET` | Long random string; part of the webhook URL. Treat it as a password. |
+| `PROCESS_INLINE` | Process a call immediately after the webhook post (default `true`). |
+| `POLL_ENABLED` | Allow the poller to run for domains with polling enabled. |
+| `POLL_LOOKBACK_MINUTES` | Overlap window (default 10) so no CDR is missed. |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_ENCRYPTION` | Outlook defaults: `smtp.office365.com`, `587`, `starttls`. |
+| `MAIL_USERNAME` / `MAIL_PASSWORD` | Sender mailbox and **app password** (SMTP AUTH must be enabled). |
+| `MAIL_FROM_ADDRESS` / `MAIL_FROM_NAME` / `MAIL_REPLY_TO` | Envelope and display names. |
+| `ALLOW_PUBLIC_AUDIO_LINKS` | Enables signed recording links in alert emails (default `true`). |
+| `RECORDING_CACHE` | Cache recordings under `storage\recordings` (saves NetSapiens bandwidth). |
+| `LOG_LEVEL` | `debug`, `info`, `warning`, `error`. |
+
+Settings you can change in the UI without touching `.env`: alert master switch, minimum severity,
+transcript retries, dashboard window, retention, poll lookback, extra always-copy recipients,
+default report recipients, and auto-import of unknown domains.
+
+## NetSapiens setup
+
+1. **Create an API key** for the machine account DynaPulse uses to read CDRs, transcriptions and
+   recordings. Put it in `NS_API_KEY`.
+2. **Create an OAuth client** (client id + secret) for password grants and put both in `.env`. The
+   token response’s `domain` field defines the portal scope of the signed-in user.
+3. **Create the CDR event subscription.** Either press *Create subscription* under
+   **Settings → Ingestion**, or run:
+
+   ```bat
+   php bin\console.php subscription:create --scope=all
+   ```
+
+   This registers `model=cdr` with `post-url=https://your-host/webhook/netsapiens/<WEBHOOK_SECRET>`.
+   NetSapiens requires a publicly reachable **HTTPS** endpoint with a valid certificate.
+4. NetSapiens event subscriptions are delivered on a short poll interval (a few seconds), not in real
+   time. DynaPulse retries transcript lookups with backoff until Call Intelligence reports
+   `finished`, then sends the alert.
+
+## Scheduled jobs
+
+Point Windows Task Scheduler at these commands. All are idempotent and safe to overlap.
+
+| Command | Suggested cadence | What it does |
+|---|---|---|
+| `php bin\console.php poll` | every 5 minutes | Pulls recent CDRs per pollable domain (safety net). |
+| `php bin\console.php process` | every 5 minutes | Drains the processing queue (transcript, recording, matching). `process --call=ID` forces one call and prints the outcome. |
+| `php bin\console.php notify` | every minute | Sends queued alert emails not already sent inline. |
+| `php bin\console.php reports:run` | every 15 minutes | Sends report schedules that are due. |
+| `php bin\console.php prune` | nightly | Deletes records older than the retention window. |
+
+Create them from an elevated prompt with absolute paths (this is the XAMPP layout used in the
+screenshots of this guide — adjust the two paths if yours differ):
+
+```bat
+schtasks /Create /TN "DynaPulse poll"    /SC MINUTE /MO 5 /F ^
+  /TR "\"C:\xampp\php\php.exe\" \"D:\private\dynapulse\bin\console.php\" poll"
+
+schtasks /Create /TN "DynaPulse process" /SC MINUTE /MO 5 /F ^
+  /TR "\"C:\xampp\php\php.exe\" \"D:\private\dynapulse\bin\console.php\" process"
+
+schtasks /Create /TN "DynaPulse notify"  /SC MINUTE /MO 1 /F ^
+  /TR "\"C:\xampp\php\php.exe\" \"D:\private\dynapulse\bin\console.php\" notify"
+```
+
+Check them with `schtasks /Query /TN "DynaPulse process" /V /FO LIST` and run one by hand with
+`schtasks /Run /TN "DynaPulse process"`. Without these, calls stay at **status pending · attempt 0**
+forever: the web UI never processes anything by itself.
+
+### Updating an existing install
+
+```bat
+php bin\console.php update --branch=main
+```
+
+It downloads the branch zip, unpacks it, replaces `src`, `bin`, `views`, `tests`, `migrations`,
+`bootstrap.php`, `autoload.php`, `routes.php`, `VERSION` and (when `public/` is found) the public files,
+then runs the migrations. `.env` and `storage/` are never touched, so the update is repeatable.
+
+Unpacking needs no particular extension: ext-zip is used when present, otherwise PharData, otherwise a
+built-in reader that only needs zlib — a stock XAMPP where `;extension=zip` is still commented out updates
+fine.
+
+If the box has no CA bundle for PHP's curl (`unable to get local issuer certificate`), download the zip
+in the browser or PowerShell and hand it over instead:
+
+```bat
+php bin\console.php update --zip=%TEMP%\dp.zip
+```
+
+`php bin\console.php version` prints the build that is actually on disk — compare it with the release you
+just copied. `public/dp-check.php` shows the same build in the browser.
+
+Useful diagnostics: `console.php status` (counters plus per-domain last poll / last error),
+`console.php ns:test` (checks the API key, the domain list, a real CDR query with `raw=yes` and the
+transcript identifiers found on the sample CDR),
+`console.php transcript:test --call=ID [--apply] [--cdr]` (shows where every Call Intelligence identifier
+came from, then fetches that call's payload and shows what was parsed; `--cdr` dumps the stored CDR identity
+and every raw key),
+`console.php repair` (poll → audit → retry the transcripts → drain the queue, in one go),
+`console.php version` (which build is running and what it supports — compare after every update),
+`console.php calls:reprocess` (retries calls that have a job id but no stored transcript, and repairs the
+call ids / job id of rows ingested without them),
+`console.php calls:audit [--limit] [--show]` (which identifiers the stored CDRs actually carry, plus full
+payloads of the calls that have none),
+`console.php domains:sync` (import the domains the API key can see; used by *Administration → Domains →
+Import*),
+`console.php test-mail --to=you@example.com`, `console.php migrate`, `console.php help`.
+
+## How alerting works
+
+1. A completed call arrives (webhook or poller) and is stored with the raw CDR.
+2. The worker fetches Call Intelligence data: summary, topics, per-segment sentiment and percentages.
+3. Every **active** keyword is matched against the **Call Intelligence topics** — the tags
+   NetSapiens extracted for the call — using phrase, whole-word or regex matching. Each keyword can
+   also search the summary, the full transcript, the caller number or the called number; keywords
+   that tick nothing follow the *Keyword matching* switches in Settings (topics, plus the summary
+   and/or the transcript when those are enabled).
+4. Matches below the minimum severity are recorded but do not email.
+5. **One grouped email per call** goes to the domain’s active recipients (plus the global fallback
+   list), so five keywords on one call produce one message, not five.
+6. The email contains the caller and called numbers, date/time in the domain timezone, duration, the
+   Call Intelligence summary, the exact trigger list (keyword, field, snippet, severity) and a
+   **Listen to the recording** button. The button uses an HMAC-signed URL, so it works without a
+   portal login and expires automatically.
+
+Delivery status is visible per call (*Alerts* card) and per keyword on the *Alerts* page.
+
+## Roles
+
+| Role | Scope |
+|---|---|
+| **Administrator** | All domains (with an *All domains* switcher), portal users, domains, global keywords, recipients, SMTP/ingestion settings, exports. |
+| **Manager** | Everything for their own domain: calls, recordings, keywords, recipients, report schedules. |
+| **Viewer** | Read-only access to calls, alerts and reports for their domain. |
+
+The last active administrator cannot be demoted or disabled from the UI.
+
+## Exports and reports
+
+- **Calls** and **Alerts** tables export to **CSV** and **XLSX** with the current filters applied.
+- **Transcripts** download as plain text from the call page; recordings download through the proxy.
+- **Report schedules** (Reports page) support daily/weekly/monthly cadence, look-back window,
+  recipient list, and optional CSV/XLSX attachments. Each run is recorded with call/alert counts and
+  any delivery error.
+
+## Security notes
+
+- The private folder is outside the web root; only `public\` is served.
+- Logins are validated against NetSapiens; DynaPulse stores no passwords.
+- Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` behind HTTPS.
+- CSRF tokens are required on every state-changing route, including login.
+- Login attempts are rate limited per identity + IP.
+- The portal sends a nonce-based CSP, `X-Frame-Options: DENY`, `nosniff` and HSTS on HTTPS.
+- The NetSapiens API key never reaches the browser: recordings stream through `AudioController`.
+- Signed recording links are scoped to one call, expire (30 days by default) and can be disabled with
+  `ALLOW_PUBLIC_AUDIO_LINKS=false`.
+
+## Testing
+
+The suite has no external dependencies and uses an in-memory NetSapiens fake plus a throwaway SQLite
+database:
+
+```bat
+php tests\run.php
+```
+
+It covers CDR mapping, keyword matching (phrase/word/regex/case), HMAC link signing, XLSX generation,
+and a full ingest → process → match → alert-queue cycle.
+
+Useful extras while developing:
+
+```bat
+php bin\console.php status
+php bin\console.php poll 24
+php bin\console.php process --limit=10 --budget=45
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---|---|
+| “DynaPulse cannot find its private folder” | Create `public\private_path.php` with the absolute private path, or set `DYN_PULSE_PRIVATE`. |
+| Apache: “The requested URL was not found on this server” for `/login` | `public\.htaccess` is missing, or `AllowOverride None` is set for the folder in `httpd.conf`. The folder URL still loads because `index.php` is the directory index. |
+| Apache: HTTP 500 mentioning `RewriteEngine` | mod_rewrite is not loaded, or `.htaccess` overrides are not allowed — see *Configure the web server*. |
+| “Page not found” on the address you opened | The address must include the portal folder, e.g. `http://server/dynapulse/public/`. Open `dp-check.php` and compare *Request → URL prefix* with the address in the browser. |
+| Login says credentials were not accepted | `NS_CLIENT_ID`/`NS_CLIENT_SECRET` wrong, or the NetSapiens user lacks API scope. Check `storage\logs`. |
+| Emails never arrive | SMTP AUTH disabled on the mailbox, wrong app password, or `MAIL_FROM_ADDRESS` not matching the sender. Use *Send test*. |
+| Alerts show “Email not configured” | `MAIL_*` values missing in `.env`; the portal logs `alert.blocked`. |
+| Calls appear but no transcripts | Run `php bin\console.php transcript:test --call=ID`. It prints a *resolved lookup* block — domain, job id, `YYYYMM` and both call ids, each tagged with where the value came from (*the CDR's prefilled link*, *the CDR (`call-orig-call-id`)*, *the row*) — then the exact URL, the HTTP status and the parsed summary/segments. `--apply` saves the result and re-runs matching. `php bin\console.php calls:reprocess` retries every call that has a job id but no transcript (useful after a fix, or when processing gave up after 8 attempts) and repairs rows that were stored without call ids. |
+| A transcription exists in NetSapiens but the portal cannot see it | The endpoint accepts three shapes: `orig_callid`+`term_callid`, or a single `callid` (the CDR's `call-id`, e.g. `0_2654816984@172.16.10.109`), or `id`+`date` only. DynaPulse tries them in that order and also tries the bare spelling without the `0_` leg prefix; `transcript:test --call=ID` prints the exact list and which one answered. |
+| `403 Bad request. Invalid domain or callids.` from `/transcriptions` | NetSapiens rejects the domain unless it is spelled exactly as configured (`1180.DynaCloud`, not `1180.dynacloud`) and both call ids are present. The portal replies on three levels: it replays the CDR's `prefilled-transcription-api` verbatim, it adopts NetSapiens' spelling on ingest, and when a request still comes back 403 it looks the domain up in `/domains`, retries once with the exact spelling and re-spells the row. `transcript:test --call=ID` prints every identifier with the place it came from. |
+| Transcript marked “unavailable” with no HTTP call made | The stored CDR carried neither call ids nor a `prefilled-transcription-api`. Run `php bin\console.php calls:audit`: it reports which identifiers the stored CDRs actually carry, the most common raw keys, and a sample payload — so you can tell “no raw CDR was kept” (re-ingest with `poll 72`) from “the CDR really has no ids” (the CDR shape NetSapiens returns for that key). |
+| After an update, does the box run the new code? | `php bin\console.php version` prints the build (from `private/VERSION`) and its feature list. If the build number is older than the release you downloaded, the files were not replaced — overwrite `private\src`, `private\bin`, `private\views` and `private\VERSION`. |
+| Every CDR lacks the call ids | The default NetSapiens CDR view is trimmed. The poller now requests `/domains/{domain}/cdrs` with `raw=yes`, which is what returns `call-orig-call-id`, `call-term-call-id` and `prefilled-transcription-api` (older builds that reject the flag are retried without it and log `netsapiens.raw_cdr_rejected`). Rows ingested before the change keep the payload they were stored with, so refresh them: `php bin\console.php poll 168`, then `php bin\console.php calls:audit` and `calls:reprocess`. `ns:test` prints the identifiers found on a sample CDR. |
+| One domain has no transcripts at all | `php bin\console.php calls:audit` now prints a per-domain table: if `job id` is 0% for a domain, NetSapiens created no Call Intelligence job for those calls (the CDR carries `call-intelligence-job-id: null`), so there is nothing to fetch. Enable Call Intelligence / recording transcription for that domain in NetSapiens and confirm the calls have recordings. A healthy domain shows a non-null job id plus a `prefilled-transcription-api` on each CDR. |
+| Many calls say “the CDR carried no NetSapiens call ids” | `php bin\console.php calls:audit --show=3` prints the coverage per key plus full payloads of the offenders. If a fresh `poll 2` still yields CDRs without `call-orig-call-id`/`prefilled-transcription-api`, the API key is reading an older CDR shape — the audit output is what to send on. |
+| `transcript:test` says HTTP 404 | NetSapiens has no Call Intelligence row for that job/date/call id yet — the job may still be running, or the CDR carried no `call-intelligence-job-id` (Call Intelligence was off when the call happened). |
+| Transcript stored but alerts never fired | Keywords are matched against the Call Intelligence **topics** by default. If NetSapiens tagged the call with something else and the topic you watch never appears, tick *Summary* on the keyword (or enable *Also match the summary* in Settings). Also check the severity against `alert_min_severity` and re-run `php bin\console.php calls:reprocess`. |
+| Recording button 404s | No recording on file in NetSapiens (recording disabled for that user), or the media URL expired before download. Calls whose stored CDR had no call ids are never looked up (their `cdr-…` id is not a NetSapiens id) and report no recording instead of a 404. |
+| **No calls at all** (dashboard and Calls list empty) | Nothing has been ingested yet. Run `php bin\console.php ns:test` — it tells you whether the API key works, which domains are configured and whether `/domains/{domain}/cdrs` returns rows. Then `php bin\console.php domains:sync` and `php bin\console.php poll 72`. Without the webhook or a scheduled `poll`, no CDR ever reaches the portal. The same information is on *Settings → Environment health → Ingestion*. |
+| `ns:test` says 0 CDR rows for a domain | The window is empty, the domain name does not match NetSapiens exactly, or the API key cannot read CDRs for that domain (HTTP 403). Try `--hours=168` and check the domain name in NetSapiens. |
+| `ns:test` says HTTP 401/403 on `/domains` | `NS_API_KEY` is wrong or expired, or the key is scoped to a different domain. |
+| Calls exist but the list is empty | The list defaults to the last 30 days (`dashboard_days`); widen the date range on the Calls page. |
+| Webhook returns 403 | `WEBHOOK_SECRET` in the URL does not match `.env`, or the subscription id differs from `WEBHOOK_SUBSCRIPTION_ID`. |
+| Domain missing after switching | Run *Sync from NetSapiens* under Administration → Domains. |
+
+Logs are written daily to `D:\private\DynaPulse\storage\logs\app-YYYY-MM-DD.log`; the last lines are
+also visible under *Settings → Environment health*.
